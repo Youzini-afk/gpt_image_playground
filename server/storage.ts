@@ -1,90 +1,215 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, unlinkSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
+import Database from 'better-sqlite3'
 
 export class FileStorage {
+  private db: Database.Database
+  private dbFile: string
   private tasksFile: string
   private imagesDir: string
   private canvasDir: string
 
   constructor(dataDir: string) {
     if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true })
+    this.dbFile = join(dataDir, 'storage.db')
     this.tasksFile = join(dataDir, 'tasks.json')
     this.imagesDir = join(dataDir, 'images')
     this.canvasDir = join(dataDir, 'canvas')
+
+    this.db = new Database(this.dbFile)
+    this.db.pragma('journal_mode = WAL')
+    this.db.pragma('synchronous = NORMAL')
+    this.db.pragma('foreign_keys = ON')
+    this.initSchema()
+    this.migrateLegacyJsonIfNeeded()
+  }
+
+  private initSchema(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS tasks (
+        id TEXT PRIMARY KEY,
+        data_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE TABLE IF NOT EXISTS images (
+        id TEXT PRIMARY KEY,
+        data_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE TABLE IF NOT EXISTS canvas_images (
+        id TEXT PRIMARY KEY,
+        data_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_images_created_at ON images(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_canvas_created_at ON canvas_images(created_at DESC);
+    `)
+  }
+
+  private migrateLegacyJsonIfNeeded(): void {
+    const hasTasks = this.count('tasks') > 0
+    const hasImages = this.count('images') > 0
+    const hasCanvas = this.count('canvas_images') > 0
+    if (hasTasks || hasImages || hasCanvas) return
+
     if (!existsSync(this.imagesDir)) mkdirSync(this.imagesDir, { recursive: true })
     if (!existsSync(this.canvasDir)) mkdirSync(this.canvasDir, { recursive: true })
-    if (!existsSync(this.tasksFile)) writeFileSync(this.tasksFile, '[]', 'utf-8')
+
+    const legacyTasks = this.readLegacyArray(this.tasksFile)
+    const legacyImages = this.readLegacyDir(this.imagesDir)
+    const legacyCanvas = this.readLegacyDir(this.canvasDir)
+    if (legacyTasks.length === 0 && legacyImages.length === 0 && legacyCanvas.length === 0) return
+
+    const migrate = this.db.transaction(() => {
+      for (const task of legacyTasks) this.putTask(task as { id: string; createdAt?: number })
+      for (const image of legacyImages) this.putImage(image as { id: string; createdAt?: number })
+      for (const item of legacyCanvas) this.putCanvasImage(item as { id: string; createdAt?: number })
+    })
+    migrate()
+  }
+
+  private count(table: 'tasks' | 'images' | 'canvas_images'): number {
+    const row = this.db.prepare(`SELECT COUNT(1) AS c FROM ${table}`).get() as { c: number }
+    return row?.c ?? 0
+  }
+
+  private readLegacyArray(path: string): unknown[] {
+    if (!existsSync(path)) return []
+    try {
+      const parsed = JSON.parse(readFileSync(path, 'utf-8'))
+      return Array.isArray(parsed) ? parsed : []
+    } catch {
+      return []
+    }
+  }
+
+  private readLegacyDir(path: string): unknown[] {
+    if (!existsSync(path)) return []
+    const files = readdirSync(path).filter((f) => f.endsWith('.json'))
+    const rows: unknown[] = []
+    for (const file of files) {
+      try {
+        rows.push(JSON.parse(readFileSync(join(path, file), 'utf-8')))
+      } catch {
+        // ignore invalid legacy file
+      }
+    }
+    return rows
   }
 
   getAllTasks<TaskRecord>(): TaskRecord[] {
-    return JSON.parse(readFileSync(this.tasksFile, 'utf-8'))
+    const rows = this.db
+      .prepare('SELECT data_json FROM tasks ORDER BY created_at DESC, rowid DESC')
+      .all() as Array<{ data_json: string }>
+    return rows.map((row) => JSON.parse(row.data_json) as TaskRecord)
   }
 
-  putTask<TaskRecord extends { id: string }>(task: TaskRecord): void {
-    const tasks = this.getAllTasks<TaskRecord>()
-    const index = tasks.findIndex((t: TaskRecord) => t.id === task.id)
-    if (index >= 0) {
-      tasks[index] = task
-    } else {
-      tasks.unshift(task)
-    }
-    writeFileSync(this.tasksFile, JSON.stringify(tasks), 'utf-8')
+  putTask<TaskRecord extends { id: string; createdAt?: number }>(task: TaskRecord): void {
+    this.db
+      .prepare(`
+        INSERT INTO tasks (id, data_json, created_at)
+        VALUES (@id, @data_json, @created_at)
+        ON CONFLICT(id) DO UPDATE SET
+          data_json = excluded.data_json,
+          created_at = excluded.created_at
+      `)
+      .run({
+        id: task.id,
+        data_json: JSON.stringify(task),
+        created_at: task.createdAt ?? 0,
+      })
   }
 
   deleteTask(id: string): void {
-    const tasks = this.getAllTasks().filter((t: { id: string }) => t.id !== id)
-    writeFileSync(this.tasksFile, JSON.stringify(tasks), 'utf-8')
+    this.db.prepare('DELETE FROM tasks WHERE id = ?').run(id)
   }
 
   clearTasks(): void {
-    writeFileSync(this.tasksFile, '[]', 'utf-8')
+    this.db.prepare('DELETE FROM tasks').run()
   }
 
   getAllImages<Image>(): Image[] {
-    const files = readdirSync(this.imagesDir).filter(f => f.endsWith('.json'))
-    return files.map(f => JSON.parse(readFileSync(join(this.imagesDir, f), 'utf-8')))
+    const rows = this.db
+      .prepare('SELECT data_json FROM images ORDER BY created_at DESC, rowid DESC')
+      .all() as Array<{ data_json: string }>
+    return rows.map((row) => JSON.parse(row.data_json) as Image)
   }
 
   getImage<Image>(id: string): Image | undefined {
-    const file = join(this.imagesDir, `${id}.json`)
-    if (!existsSync(file)) return undefined
-    return JSON.parse(readFileSync(file, 'utf-8'))
+    const row = this.db.prepare('SELECT data_json FROM images WHERE id = ?').get(id) as { data_json: string } | undefined
+    return row ? (JSON.parse(row.data_json) as Image) : undefined
   }
 
-  putImage<Image extends { id: string }>(image: Image): void {
-    const file = join(this.imagesDir, `${image.id}.json`)
-    writeFileSync(file, JSON.stringify(image), 'utf-8')
+  putImage<Image extends { id: string; createdAt?: number }>(image: Image): void {
+    this.db
+      .prepare(`
+        INSERT INTO images (id, data_json, created_at)
+        VALUES (@id, @data_json, @created_at)
+        ON CONFLICT(id) DO UPDATE SET
+          data_json = excluded.data_json,
+          created_at = excluded.created_at
+      `)
+      .run({
+        id: image.id,
+        data_json: JSON.stringify(image),
+        created_at: image.createdAt ?? 0,
+      })
   }
 
   deleteImage(id: string): void {
-    const file = join(this.imagesDir, `${id}.json`)
-    if (existsSync(file)) unlinkSync(file)
+    this.db.prepare('DELETE FROM images WHERE id = ?').run(id)
+    const legacyFile = join(this.imagesDir, `${id}.json`)
+    if (existsSync(legacyFile)) unlinkSync(legacyFile)
   }
 
   clearImages(): void {
-    const files = readdirSync(this.imagesDir).filter(f => f.endsWith('.json'))
-    for (const f of files) unlinkSync(join(this.imagesDir, f))
+    this.db.prepare('DELETE FROM images').run()
+    if (existsSync(this.imagesDir)) {
+      const files = readdirSync(this.imagesDir).filter((f) => f.endsWith('.json'))
+      for (const f of files) unlinkSync(join(this.imagesDir, f))
+    }
   }
 
   // ===== Canvas Images =====
 
   getAllCanvasImages<Item>(): Item[] {
-    const files = readdirSync(this.canvasDir).filter(f => f.endsWith('.json'))
-    return files.map(f => JSON.parse(readFileSync(join(this.canvasDir, f), 'utf-8')))
+    const rows = this.db
+      .prepare('SELECT data_json FROM canvas_images ORDER BY created_at DESC, rowid DESC')
+      .all() as Array<{ data_json: string }>
+    return rows.map((row) => JSON.parse(row.data_json) as Item)
   }
 
-  putCanvasImage<Item extends { id: string }>(item: Item): void {
-    const file = join(this.canvasDir, `${item.id}.json`)
-    writeFileSync(file, JSON.stringify(item), 'utf-8')
+  putCanvasImage<Item extends { id: string; createdAt?: number }>(item: Item): void {
+    this.db
+      .prepare(`
+        INSERT INTO canvas_images (id, data_json, created_at)
+        VALUES (@id, @data_json, @created_at)
+        ON CONFLICT(id) DO UPDATE SET
+          data_json = excluded.data_json,
+          created_at = excluded.created_at
+      `)
+      .run({
+        id: item.id,
+        data_json: JSON.stringify(item),
+        created_at: item.createdAt ?? 0,
+      })
   }
 
   deleteCanvasImage(id: string): void {
-    const file = join(this.canvasDir, `${id}.json`)
-    if (existsSync(file)) unlinkSync(file)
+    this.db.prepare('DELETE FROM canvas_images WHERE id = ?').run(id)
+    const legacyFile = join(this.canvasDir, `${id}.json`)
+    if (existsSync(legacyFile)) unlinkSync(legacyFile)
   }
 
   clearCanvasImages(): void {
-    const files = readdirSync(this.canvasDir).filter(f => f.endsWith('.json'))
-    for (const f of files) unlinkSync(join(this.canvasDir, f))
+    this.db.prepare('DELETE FROM canvas_images').run()
+    if (existsSync(this.canvasDir)) {
+      const files = readdirSync(this.canvasDir).filter((f) => f.endsWith('.json'))
+      for (const f of files) unlinkSync(join(this.canvasDir, f))
+    }
   }
 }

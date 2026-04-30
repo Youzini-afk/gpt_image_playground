@@ -6,7 +6,7 @@ const result = buildSync({
   platform: 'node',
   outfile: 'dist-server/index.js',
   format: 'esm',
-  external: [],
+  external: ['better-sqlite3'],
   minify: true,
 })
 
