@@ -379,6 +379,8 @@ export async function initStore() {
     for (const ci of canvasImages) {
       referencedIds.add(ci.imageId)
     }
+    for (const id of savedInputImageIds) referencedIds.add(id)
+    if (savedMaskDraft?.targetImageId) referencedIds.add(savedMaskDraft.targetImageId)
 
     const images = await storage.getAllImages()
     for (const img of images) {
