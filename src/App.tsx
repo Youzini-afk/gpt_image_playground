@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { initStore } from './store'
+import { initStore, initStorageMode } from './store'
 import { useStore } from './store'
 import { normalizeBaseUrl } from './lib/api'
 import type { ApiMode } from './types'
@@ -55,6 +55,7 @@ export default function App() {
       window.history.replaceState(null, '', nextUrl)
     }
 
+    initStorageMode()
     initStore()
   }, [setSettings])
 

@@ -7,21 +7,11 @@ import type {
   MaskDraft,
   TaskRecord,
   ExportData,
+  StoredImage,
 } from './types'
 import { DEFAULT_SETTINGS, DEFAULT_PARAMS } from './types'
-import {
-  getAllTasks,
-  putTask,
-  deleteTask as dbDeleteTask,
-  clearTasks as dbClearTasks,
-  getImage,
-  getAllImages,
-  putImage,
-  deleteImage,
-  clearImages,
-  storeImage,
-  hashDataUrl,
-} from './lib/db'
+import { hashDataUrl } from './lib/db'
+import { getStorage, setStorageMode } from './lib/storage'
 import { callImageApi } from './lib/api'
 import { validateMaskMatchesImage } from './lib/canvasImage'
 import { orderInputImagesForMask } from './lib/mask'
@@ -39,7 +29,8 @@ export function getCachedImage(id: string): string | undefined {
 
 export async function ensureImageCached(id: string): Promise<string | undefined> {
   if (imageCache.has(id)) return imageCache.get(id)
-  const rec = await getImage(id)
+  const storage = getStorage()
+  const rec = await storage.getImage(id)
   if (rec) {
     imageCache.set(id, rec.dataUrl)
     return rec.dataUrl
@@ -284,6 +275,19 @@ function genId(): string {
   return Date.now().toString(36) + (++uid).toString(36) + Math.random().toString(36).slice(2, 6)
 }
 
+/** Initialize storage mode based on settings */
+export function initStorageMode() {
+  const { settings } = useStore.getState()
+  setStorageMode(settings.storageMode, settings.storageUrl || window.location.origin, settings.storageToken)
+}
+
+/** Switch storage mode and reload data from the new backend */
+export async function switchStorageMode(mode: 'local' | 'remote', url?: string, token?: string) {
+  setStorageMode(mode, url || window.location.origin, token || '')
+  imageCache.clear()
+  await initStore()
+}
+
 export function getCodexCliPromptKey(settings: AppSettings): string {
   return `${settings.baseUrl}\n${settings.apiKey}`
 }
@@ -315,12 +319,12 @@ function normalizeParamsForSettings(params: TaskParams, settings: AppSettings): 
   }
 }
 
-/** 初始化：从 IndexedDB 加载任务和图片缓存，清理孤立图片 */
+/** 初始化：从存储加载任务和图片缓存，清理孤立图片 */
 export async function initStore() {
-  const tasks = await getAllTasks()
+  const storage = getStorage()
+  const tasks = await storage.getAllTasks()
   useStore.getState().setTasks(tasks)
 
-  // 收集所有任务引用的图片 id
   const referencedIds = new Set<string>()
   for (const t of tasks) {
     for (const id of t.inputImageIds || []) referencedIds.add(id)
@@ -328,15 +332,27 @@ export async function initStore() {
     for (const id of t.outputImages || []) referencedIds.add(id)
   }
 
-  // 预加载所有图片到缓存，同时清理孤立图片
-  const images = await getAllImages()
+  const images = await storage.getAllImages()
   for (const img of images) {
     if (referencedIds.has(img.id)) {
       imageCache.set(img.id, img.dataUrl)
     } else {
-      await deleteImage(img.id)
+      await storage.deleteImage(img.id)
     }
   }
+}
+
+/** 存储图片到当前存储后端，若已存在则跳过。返回 image id。 */
+async function storeImageData(dataUrl: string, source: NonNullable<StoredImage['source']> = 'upload'): Promise<string> {
+  const id = await hashDataUrl(dataUrl)
+  if (imageCache.has(id)) return id
+  const storage = getStorage()
+  const existing = await storage.getImage(id)
+  if (!existing) {
+    await storage.putImage({ id, dataUrl, createdAt: Date.now(), source })
+  }
+  imageCache.set(id, dataUrl)
+  return id
 }
 
 /** 提交新任务 */
@@ -375,7 +391,7 @@ export async function submitTask(options: { allowFullMask?: boolean } = {}) {
         })
         return
       }
-      maskImageId = await storeImage(maskDraft.maskDataUrl, 'mask')
+      maskImageId = await storeImageData(maskDraft.maskDataUrl, 'mask')
       imageCache.set(maskImageId, maskDraft.maskDataUrl)
       maskTargetImageId = maskDraft.targetImageId
     } catch (err) {
@@ -387,9 +403,9 @@ export async function submitTask(options: { allowFullMask?: boolean } = {}) {
     }
   }
 
-  // 持久化输入图片到 IndexedDB（此前只在内存缓存中）
+  // 持久化输入图片到存储（此前只在内存缓存中）
   for (const img of orderedInputImages) {
-    await storeImage(img.dataUrl)
+    await storeImageData(img.dataUrl)
   }
 
   const normalizedParams = normalizeParamsForSettings(params, settings)
@@ -415,7 +431,7 @@ export async function submitTask(options: { allowFullMask?: boolean } = {}) {
 
   const latestTasks = useStore.getState().tasks
   useStore.getState().setTasks([task, ...latestTasks])
-  await putTask(task)
+  await getStorage().putTask(task)
 
   // 异步调用 API
   executeTask(taskId)
@@ -451,7 +467,7 @@ async function executeTask(taskId: string) {
     // 存储输出图片
     const outputIds: string[] = []
     for (const dataUrl of result.images) {
-      const imgId = await storeImage(dataUrl, 'generated')
+      const imgId = await storeImageData(dataUrl, 'generated')
       imageCache.set(imgId, dataUrl)
       outputIds.push(imgId)
     }
@@ -521,7 +537,7 @@ export function updateTaskInStore(taskId: string, patch: Partial<TaskRecord>) {
   )
   setTasks(updated)
   const task = updated.find((t) => t.id === taskId)
-  if (task) putTask(task)
+  if (task) getStorage().putTask(task)
 }
 
 /** 重试失败的任务：创建新任务并执行 */
@@ -546,7 +562,7 @@ export async function retryTask(task: TaskRecord) {
 
   const latestTasks = useStore.getState().tasks
   useStore.getState().setTasks([newTask, ...latestTasks])
-  await putTask(newTask)
+  await getStorage().putTask(newTask)
 
   executeTask(taskId)
 }
@@ -621,8 +637,9 @@ export async function removeMultipleTasks(taskIds: string[]) {
   }
 
   setTasks(remaining)
+  const storage = getStorage()
   for (const id of taskIds) {
-    await dbDeleteTask(id)
+    await storage.deleteTask(id)
   }
 
   // 找出其他任务仍引用的图片
@@ -637,7 +654,7 @@ export async function removeMultipleTasks(taskIds: string[]) {
   // 删除孤立图片
   for (const imgId of deletedImageIds) {
     if (!stillUsed.has(imgId)) {
-      await deleteImage(imgId)
+      await storage.deleteImage(imgId)
       imageCache.delete(imgId)
     }
   }
@@ -665,7 +682,7 @@ export async function removeTask(task: TaskRecord) {
   // 从列表移除
   const remaining = tasks.filter((t) => t.id !== task.id)
   setTasks(remaining)
-  await dbDeleteTask(task.id)
+  await getStorage().deleteTask(task.id)
 
   // 找出其他任务仍引用的图片
   const stillUsed = new Set<string>()
@@ -679,7 +696,7 @@ export async function removeTask(task: TaskRecord) {
   // 删除孤立图片
   for (const imgId of taskImageIds) {
     if (!stillUsed.has(imgId)) {
-      await deleteImage(imgId)
+      await getStorage().deleteImage(imgId)
       imageCache.delete(imgId)
     }
   }
@@ -689,8 +706,9 @@ export async function removeTask(task: TaskRecord) {
 
 /** 清空所有数据（含配置重置） */
 export async function clearAllData() {
-  await dbClearTasks()
-  await clearImages()
+  const storage = getStorage()
+  await storage.clearTasks()
+  await storage.clearImages()
   imageCache.clear()
   const { setTasks, clearInputImages, clearMaskDraft, setSettings, setParams, showToast } = useStore.getState()
   setTasks([])
@@ -726,8 +744,9 @@ function bytesToDataUrl(bytes: Uint8Array, filePath: string): string {
 /** 导出数据为 ZIP */
 export async function exportData() {
   try {
-    const tasks = await getAllTasks()
-    const images = await getAllImages()
+    const storage = getStorage()
+    const tasks = await storage.getAllTasks()
+    const images = await storage.getAllImages()
     const { settings } = useStore.getState()
     const exportedAt = Date.now()
     const imageCreatedAtFallback = new Map<string, number>()
@@ -802,19 +821,19 @@ export async function importData(file: File) {
       const bytes = unzipped[info.path]
       if (!bytes) continue
       const dataUrl = bytesToDataUrl(bytes, info.path)
-      await putImage({ id, dataUrl, createdAt: info.createdAt, source: info.source })
+      await getStorage().putImage({ id, dataUrl, createdAt: info.createdAt, source: info.source })
       imageCache.set(id, dataUrl)
     }
 
     for (const task of data.tasks) {
-      await putTask(task)
+      await getStorage().putTask(task)
     }
 
     if (data.settings) {
       useStore.getState().setSettings(data.settings)
     }
 
-    const tasks = await getAllTasks()
+    const tasks = await getStorage().getAllTasks()
     useStore.getState().setTasks(tasks)
     useStore
       .getState()

@@ -1,7 +1,8 @@
 node_modules
 dist
+dist-server
+data
 .git
 .gitignore
 *.md
-Dockerfile
 .dockerignore

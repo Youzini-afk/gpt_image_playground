@@ -29,8 +29,6 @@ COPY --from=build /app/package.json ./
 
 RUN npm install --omit=dev hono @hono/node-server
 
-COPY --chmod=755 deploy/inject-api-url.sh /docker-entrypoint.d/40-inject-api-url.sh
-
 EXPOSE 80
 VOLUME ["/app/data"]
 
