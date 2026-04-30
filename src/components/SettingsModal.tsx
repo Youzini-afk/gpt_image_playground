@@ -293,9 +293,6 @@ export default function SettingsModal() {
                   value={draft.storageMode ?? 'local'}
                   onChange={async (value) => {
                     const storageMode = value as 'local' | 'server'
-                    const nextDraft = { ...draft, storageMode }
-                    setDraft(nextDraft)
-                    commitSettings(nextDraft)
                     setConnectionResult(null)
                     if (storageMode === 'server') {
                       setTestingConnection(true)
@@ -303,9 +300,19 @@ export default function SettingsModal() {
                       setConnectionResult(result)
                       setTestingConnection(false)
                       if (result.ok) {
+                        const nextDraft = { ...draft, storageMode: 'server' as const }
+                        setDraft(nextDraft)
+                        commitSettings(nextDraft)
                         await switchStorageMode('server')
+                      } else {
+                        const fallbackDraft = { ...draft, storageMode: 'local' as const }
+                        setDraft(fallbackDraft)
+                        commitSettings(fallbackDraft)
                       }
                     } else {
+                      const nextDraft = { ...draft, storageMode: 'local' as const }
+                      setDraft(nextDraft)
+                      commitSettings(nextDraft)
                       await switchStorageMode('local')
                     }
                   }}

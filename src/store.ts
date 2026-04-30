@@ -12,7 +12,7 @@ import type {
 } from './types'
 import { DEFAULT_SETTINGS, DEFAULT_PARAMS } from './types'
 import { hashDataUrl } from './lib/db'
-import { getStorage, setStorageMode } from './lib/storage'
+import { getStorage, setStorageMode, testServerStorage } from './lib/storage'
 import { callImageApi } from './lib/api'
 import { validateMaskMatchesImage } from './lib/canvasImage'
 import { orderInputImagesForMask } from './lib/mask'
@@ -287,10 +287,21 @@ function genId(): string {
   return Date.now().toString(36) + (++uid).toString(36) + Math.random().toString(36).slice(2, 6)
 }
 
-/** Initialize storage mode based on settings */
-export function initStorageMode() {
-  const { settings } = useStore.getState()
-  setStorageMode(settings.storageMode)
+/** Initialize storage mode based on settings with runtime fallback. */
+export async function initStorageMode() {
+  const { settings, setSettings } = useStore.getState()
+  if (settings.storageMode === 'server') {
+    const result = await testServerStorage()
+    if (result.ok) {
+      setStorageMode('server')
+      return
+    }
+    console.warn('server storage unavailable on init, fallback to local:', result.error || 'unknown error')
+    setStorageMode('local')
+    setSettings({ storageMode: 'local' })
+    return
+  }
+  setStorageMode('local')
 }
 
 /** Switch storage mode and reload data from the new backend */
