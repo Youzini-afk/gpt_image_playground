@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, useRef } from 'react'
-import { useStore, getCachedImage, ensureImageCached, reuseConfig, editOutputs, removeTask, updateTaskInStore, showCodexCliPrompt, getCodexCliPromptKey, retryTask } from '../store'
+import { useStore, getCachedImage, ensureImageCached, reuseConfig, editOutputs, removeTask, updateTaskInStore, showCodexCliPrompt, getCodexCliPromptKey, retryTask, addImageToCanvas } from '../store'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 import { formatImageRatio } from '../lib/size'
 import { ActualValueBadge, DetailParamValue } from '../lib/paramDisplay'
@@ -260,6 +260,15 @@ export default function DetailModal() {
     setDetailTaskId(null)
   }
 
+  const handleAddToCanvas = () => {
+    if (!task.outputImages?.[imageIndex]) return
+    const imgId = task.outputImages[imageIndex]
+    const src = imageSrcs[imgId]
+    if (!src) return
+    addImageToCanvas(src).catch(() => {})
+    showToast('已添加到工作台', 'success')
+  }
+
   return (
     <div
       data-no-drag-select
@@ -415,62 +424,19 @@ export default function DetailModal() {
           )}
         </div>
 
-        {/* 右侧：信息 */}
-        <div className="md:w-1/2 w-full p-5 overflow-y-auto flex flex-col">
-          <button
-            onClick={() => setDetailTaskId(null)}
-            className="absolute top-3 right-3 hidden p-1 rounded-full hover:bg-gray-100 dark:hover:bg-white/[0.06] transition text-gray-400 z-10 md:block"
-            aria-label="关闭"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-
-          <div data-selectable-text className="flex-1">
-            <div className="flex items-center gap-1.5 mb-2">
-              <h3 className="text-xs font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wider">
-                输入内容
-              </h3>
-              {task.prompt && (
-                <button
-                  onClick={handleCopyPrompt}
-                  className="p-1 rounded text-gray-400 hover:bg-gray-100 dark:text-gray-500 dark:hover:bg-white/[0.06] transition"
-                  title="复制提示词"
-                >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                  </svg>
-                </button>
-              )}
-              {showPromptWarning && (
-                <span className="relative inline-flex">
-                  <button
-                    type="button"
-                    className="p-1 rounded text-amber-500 hover:bg-amber-50 dark:text-yellow-300 dark:hover:bg-yellow-500/10 transition"
-                    onClick={handleShowPromptWarning}
-                    aria-label="提示词已被改写"
-                  >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v4m0 4h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-                    </svg>
-                  </button>
-                </span>
-              )}
-            </div>
-            <p className="text-sm text-gray-700 dark:text-gray-300 leading-relaxed whitespace-pre-wrap mb-4">
-              {task.prompt || '(无提示词)'}
-            </p>
-            {showRevisedPrompt && currentRevisedPrompt && (
-              <div className="mb-4">
-                <ActualValueBadge
-                  value={currentRevisedPrompt}
-                  className="max-w-full rounded px-2 py-1 text-left text-xs leading-relaxed whitespace-pre-wrap"
-                />
-              </div>
+        {/* 右侧：详情 */}
+        <div className="md:w-1/2 w-full flex flex-col p-6 overflow-y-auto">
+          <div className="flex-1">
+            <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100 mb-3 whitespace-pre-line leading-relaxed">{task.prompt}</h2>
+            {showRevisedPrompt && (
+              <p className="text-sm text-gray-500 dark:text-gray-400 mb-2 whitespace-pre-line leading-relaxed border-l-2 border-blue-300 dark:border-blue-500/40 pl-3">{currentRevisedPrompt}</p>
             )}
-
-            {/* 参考图 */}
+            {showPromptWarning && (
+              <button onClick={handleShowPromptWarning} className="text-xs text-amber-500 hover:text-amber-600 dark:text-amber-400 dark:hover:text-amber-300 mb-2 flex items-center gap-1 transition">
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                提示词可能被改写
+              </button>
+            )}
             {allInputImageIds.length > 0 && (
               <div className="mb-4">
                 <div className="flex items-center gap-1.5 mb-2">
@@ -584,6 +550,17 @@ export default function DetailModal() {
               </svg>
               编辑输出
             </button>
+            {task.status === 'done' && outputLen > 0 && (
+              <button
+                onClick={handleAddToCanvas}
+                className="col-span-2 sm:flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-purple-50 dark:bg-purple-500/10 text-purple-600 dark:text-purple-400 hover:bg-purple-100 dark:hover:bg-purple-500/20 transition text-sm font-medium whitespace-nowrap"
+              >
+                <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                </svg>
+                加到工作台
+              </button>
+            )}
             <button
               onClick={handleDelete}
               className="col-span-3 sm:flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-red-50 dark:bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-500/20 transition text-sm font-medium whitespace-nowrap"

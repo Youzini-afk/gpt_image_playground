@@ -4,12 +4,15 @@ import { join } from 'node:path'
 export class FileStorage {
   private tasksFile: string
   private imagesDir: string
+  private canvasDir: string
 
   constructor(dataDir: string) {
     if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true })
     this.tasksFile = join(dataDir, 'tasks.json')
     this.imagesDir = join(dataDir, 'images')
+    this.canvasDir = join(dataDir, 'canvas')
     if (!existsSync(this.imagesDir)) mkdirSync(this.imagesDir, { recursive: true })
+    if (!existsSync(this.canvasDir)) mkdirSync(this.canvasDir, { recursive: true })
     if (!existsSync(this.tasksFile)) writeFileSync(this.tasksFile, '[]', 'utf-8')
   }
 
@@ -61,5 +64,27 @@ export class FileStorage {
   clearImages(): void {
     const files = readdirSync(this.imagesDir).filter(f => f.endsWith('.json'))
     for (const f of files) unlinkSync(join(this.imagesDir, f))
+  }
+
+  // ===== Canvas Images =====
+
+  getAllCanvasImages<Item>(): Item[] {
+    const files = readdirSync(this.canvasDir).filter(f => f.endsWith('.json'))
+    return files.map(f => JSON.parse(readFileSync(join(this.canvasDir, f), 'utf-8')))
+  }
+
+  putCanvasImage<Item extends { id: string }>(item: Item): void {
+    const file = join(this.canvasDir, `${item.id}.json`)
+    writeFileSync(file, JSON.stringify(item), 'utf-8')
+  }
+
+  deleteCanvasImage(id: string): void {
+    const file = join(this.canvasDir, `${id}.json`)
+    if (existsSync(file)) unlinkSync(file)
+  }
+
+  clearCanvasImages(): void {
+    const files = readdirSync(this.canvasDir).filter(f => f.endsWith('.json'))
+    for (const f of files) unlinkSync(join(this.canvasDir, f))
   }
 }

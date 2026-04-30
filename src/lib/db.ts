@@ -1,9 +1,10 @@
-import type { TaskRecord, StoredImage } from '../types'
+import type { TaskRecord, StoredImage, CanvasImage } from '../types'
 
 const DB_NAME = 'gpt-image-playground'
-const DB_VERSION = 1
+const DB_VERSION = 2
 const STORE_TASKS = 'tasks'
 const STORE_IMAGES = 'images'
+const STORE_CANVAS = 'canvasImages'
 
 function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -15,6 +16,9 @@ function openDB(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(STORE_IMAGES)) {
         db.createObjectStore(STORE_IMAGES, { keyPath: 'id' })
+      }
+      if (!db.objectStoreNames.contains(STORE_CANVAS)) {
+        db.createObjectStore(STORE_CANVAS, { keyPath: 'id' })
       }
     }
     req.onsuccess = () => resolve(req.result)
@@ -119,4 +123,22 @@ export async function storeImage(dataUrl: string, source: NonNullable<StoredImag
     await putImage({ id, dataUrl, createdAt: Date.now(), source })
   }
   return id
+}
+
+// ===== Canvas Images =====
+
+export function getAllCanvasImages(): Promise<CanvasImage[]> {
+  return dbTransaction(STORE_CANVAS, 'readonly', (s) => s.getAll())
+}
+
+export function putCanvasImage(item: CanvasImage): Promise<IDBValidKey> {
+  return dbTransaction(STORE_CANVAS, 'readwrite', (s) => s.put(item))
+}
+
+export function deleteCanvasImage(id: string): Promise<undefined> {
+  return dbTransaction(STORE_CANVAS, 'readwrite', (s) => s.delete(id))
+}
+
+export function clearCanvasImages(): Promise<undefined> {
+  return dbTransaction(STORE_CANVAS, 'readwrite', (s) => s.clear())
 }

@@ -174,6 +174,17 @@ export interface ResponsesApiResponse {
   }>
 }
 
+// ===== 画布图片（工作台独立图片） =====
+
+export interface CanvasImage {
+  id: string
+  /** StoredImage 的 id（SHA-256 hash） */
+  imageId: string
+  /** 来源描述 */
+  label?: string
+  createdAt: number
+}
+
 // ===== 导出数据 =====
 
 /** ZIP manifest.json 格式 */
@@ -182,6 +193,7 @@ export interface ExportData {
   exportedAt: string
   settings: AppSettings
   tasks: TaskRecord[]
+  canvasImages?: CanvasImage[]
   /** imageId → 图片信息 */
   imageFiles: Record<string, {
     path: string

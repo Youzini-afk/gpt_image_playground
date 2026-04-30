@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react'
-import { useStore, addImageFromUrl } from '../store'
+import { useStore, addImageFromUrl, addImageToCanvas } from '../store'
 import { copyBlobToClipboard, getClipboardFailureMessage } from '../lib/clipboard'
 
 export default function ImageContextMenu() {
@@ -18,10 +18,8 @@ export default function ImageContextMenu() {
       const target = e.target as HTMLElement
       if (target && target.tagName === 'IMG') {
         const imgTarget = target as HTMLImageElement
-        // 忽略没有 src 或空的 img
         if (!imgTarget.src) return
 
-        // iOS 触控设备上，放行原生长按菜单（以支持原生保存图片）
         const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
         const isTouch = window.matchMedia('(pointer: coarse)').matches
         if (isIOS && isTouch) return
@@ -35,14 +33,12 @@ export default function ImageContextMenu() {
       }
     }
 
-    // 监听全局 contextmenu，兼容桌面端右键和大部分移动端长按
     window.addEventListener('contextmenu', onContextMenu)
     return () => {
       window.removeEventListener('contextmenu', onContextMenu)
     }
   }, [])
 
-  // 点击其他地方、滚动或缩放时关闭菜单
   useEffect(() => {
     if (!menuInfo) return
     const close = (e: Event) => {
@@ -106,6 +102,38 @@ export default function ImageContextMenu() {
     }
   }
 
+  const handleAddToInput = async (e: React.MouseEvent) => {
+    e.stopPropagation()
+    setMenuInfo(null)
+    if (inputImages.length >= 16) {
+      showToast('参考图数量已达上限（16 张），无法继续添加', 'error')
+      return
+    }
+
+    try {
+      await addImageFromUrl(menuInfo.src)
+      setDetailTaskId(null)
+      setLightboxImageId(null)
+      setMaskEditorImageId(null)
+      showToast('已加入参考图', 'success')
+    } catch (err) {
+      console.error(err)
+      showToast(`加入参考图失败：${err instanceof Error ? err.message : String(err)}`, 'error')
+    }
+  }
+
+  const handleAddToCanvas = async (e: React.MouseEvent) => {
+    e.stopPropagation()
+    setMenuInfo(null)
+    try {
+      await addImageToCanvas(menuInfo.src)
+      showToast('已添加到工作台', 'success')
+    } catch (err) {
+      console.error(err)
+      showToast(`添加到工作台失败：${err instanceof Error ? err.message : String(err)}`, 'error')
+    }
+  }
+
   const handleEdit = async (e: React.MouseEvent) => {
     e.stopPropagation()
     setMenuInfo(null)
@@ -126,11 +154,10 @@ export default function ImageContextMenu() {
     }
   }
 
-  // 保证菜单在视口内
   let left = menuInfo.x
   let top = menuInfo.y
-  const MENU_WIDTH = 120
-  const MENU_HEIGHT = 128 // 三个按钮高度加 padding
+  const MENU_WIDTH = 140
+  const MENU_HEIGHT = 170
 
   if (left + MENU_WIDTH > window.innerWidth) {
     left -= MENU_WIDTH
@@ -142,7 +169,7 @@ export default function ImageContextMenu() {
   return (
     <div
       ref={menuRef}
-      className="fixed z-[9999] bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-100 dark:border-gray-700 py-1 w-[120px] overflow-hidden animate-fade-in"
+      className="fixed z-[9999] bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-100 dark:border-gray-700 py-1 w-[140px] overflow-hidden animate-fade-in"
       style={{ left, top }}
       onContextMenu={(e) => e.preventDefault()}
     >
@@ -163,6 +190,24 @@ export default function ImageContextMenu() {
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
         </svg>
         下载
+      </button>
+      <button
+        onClick={handleAddToInput}
+        className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700/50 flex items-center gap-2 transition-colors"
+      >
+        <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+        </svg>
+        做参考图
+      </button>
+      <button
+        onClick={handleAddToCanvas}
+        className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700/50 flex items-center gap-2 transition-colors"
+      >
+        <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+        </svg>
+        加到工作台
       </button>
       <button
         onClick={handleEdit}

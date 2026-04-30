@@ -1,4 +1,4 @@
-import type { TaskRecord, StoredImage } from '../types'
+import type { TaskRecord, StoredImage, CanvasImage } from '../types'
 import * as localDb from './db'
 
 export type StorageMode = 'local' | 'remote'
@@ -13,6 +13,10 @@ export interface StorageAdapter {
   putImage(image: StoredImage): Promise<void>
   deleteImage(id: string): Promise<void>
   clearImages(): Promise<void>
+  getAllCanvasImages(): Promise<CanvasImage[]>
+  putCanvasImage(item: CanvasImage): Promise<void>
+  deleteCanvasImage(id: string): Promise<void>
+  clearCanvasImages(): Promise<void>
 }
 
 class LocalStorageAdapter implements StorageAdapter {
@@ -25,6 +29,10 @@ class LocalStorageAdapter implements StorageAdapter {
   putImage(image: StoredImage) { return localDb.putImage(image).then(() => {}) }
   deleteImage(id: string) { return localDb.deleteImage(id).then(() => {}) }
   clearImages() { return localDb.clearImages().then(() => {}) }
+  getAllCanvasImages() { return localDb.getAllCanvasImages() }
+  putCanvasImage(item: CanvasImage) { return localDb.putCanvasImage(item).then(() => {}) }
+  deleteCanvasImage(id: string) { return localDb.deleteCanvasImage(id).then(() => {}) }
+  clearCanvasImages() { return localDb.clearCanvasImages().then(() => {}) }
 }
 
 class RemoteStorageAdapter implements StorageAdapter {
@@ -90,6 +98,23 @@ class RemoteStorageAdapter implements StorageAdapter {
 
   async clearImages(): Promise<void> {
     await this.request('/images', { method: 'DELETE' })
+  }
+
+  async getAllCanvasImages(): Promise<CanvasImage[]> {
+    const res = await this.request('/canvas-images')
+    return res.json()
+  }
+
+  async putCanvasImage(item: CanvasImage): Promise<void> {
+    await this.request('/canvas-images', { method: 'POST', body: JSON.stringify(item) })
+  }
+
+  async deleteCanvasImage(id: string): Promise<void> {
+    await this.request(`/canvas-images/${encodeURIComponent(id)}`, { method: 'DELETE' })
+  }
+
+  async clearCanvasImages(): Promise<void> {
+    await this.request('/canvas-images', { method: 'DELETE' })
   }
 }
 

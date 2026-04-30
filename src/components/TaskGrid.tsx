@@ -1,9 +1,11 @@
 import { useMemo, useRef, useState, useEffect } from 'react'
 import { useStore, reuseConfig, editOutputs, removeTask } from '../store'
 import TaskCard from './TaskCard'
+import CanvasImageCard from './CanvasImageCard'
 
 export default function TaskGrid() {
   const tasks = useStore((s) => s.tasks)
+  const canvasImages = useStore((s) => s.canvasImages)
   const searchQuery = useStore((s) => s.searchQuery)
   const filterStatus = useStore((s) => s.filterStatus)
   const filterFavorite = useStore((s) => s.filterFavorite)
@@ -165,7 +167,7 @@ export default function TaskGrid() {
     }
   }, [clearSelection, isMac])
 
-  if (!filteredTasks.length) {
+  if (!filteredTasks.length && !canvasImages.length) {
     return (
       <div className="text-center py-20 text-gray-400 dark:text-gray-500">
         {searchQuery || filterFavorite ? (
@@ -199,6 +201,9 @@ export default function TaskGrid() {
       className="relative min-h-[50vh]"
     >
       <div ref={gridRef} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 pb-10">
+        {canvasImages.map((ci) => (
+          <CanvasImageCard key={ci.id} canvasImage={ci} />
+        ))}
         {filteredTasks.map((task) => (
           <div key={task.id} className="task-card-wrapper" data-task-id={task.id}>
             <TaskCard

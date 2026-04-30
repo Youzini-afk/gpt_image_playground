@@ -8,6 +8,7 @@ import type {
   TaskRecord,
   ExportData,
   StoredImage,
+  CanvasImage,
 } from './types'
 import { DEFAULT_SETTINGS, DEFAULT_PARAMS } from './types'
 import { hashDataUrl } from './lib/db'
@@ -79,6 +80,10 @@ interface AppState {
   // 任务列表
   tasks: TaskRecord[]
   setTasks: (t: TaskRecord[]) => void
+
+  // 画布图片
+  canvasImages: CanvasImage[]
+  setCanvasImages: (imgs: CanvasImage[]) => void
 
   // 搜索和筛选
   searchQuery: string
@@ -209,6 +214,10 @@ export const useStore = create<AppState>()(
       tasks: [],
       setTasks: (tasks) => set({ tasks }),
 
+      // Canvas images
+      canvasImages: [],
+      setCanvasImages: (canvasImages) => set({ canvasImages }),
+
       // Search & Filter
       searchQuery: '',
       setSearchQuery: (searchQuery) => set({ searchQuery }),
@@ -325,11 +334,17 @@ export async function initStore() {
   const tasks = await storage.getAllTasks()
   useStore.getState().setTasks(tasks)
 
+  const canvasImages = await storage.getAllCanvasImages()
+  useStore.getState().setCanvasImages(canvasImages)
+
   const referencedIds = new Set<string>()
   for (const t of tasks) {
     for (const id of t.inputImageIds || []) referencedIds.add(id)
     if (t.maskImageId) referencedIds.add(t.maskImageId)
     for (const id of t.outputImages || []) referencedIds.add(id)
+  }
+  for (const ci of canvasImages) {
+    referencedIds.add(ci.imageId)
   }
 
   const images = await storage.getAllImages()
@@ -343,6 +358,67 @@ export async function initStore() {
 }
 
 /** 存储图片到当前存储后端，若已存在则跳过。返回 image id。 */
+
+let _canvasIdCounter = 0
+function genCanvasId(): string {
+  return 'ci_' + Date.now().toString(36) + (++_canvasIdCounter).toString(36) + Math.random().toString(36).slice(2, 6)
+}
+
+/** 添加图片到画布工作台 */
+export async function addImageToCanvas(dataUrl: string, label?: string): Promise<string> {
+  const imgId = await storeImageData(dataUrl, 'upload')
+  const canvasId = genCanvasId()
+  const canvasImage: CanvasImage = {
+    id: canvasId,
+    imageId: imgId,
+    label: label || '',
+    createdAt: Date.now(),
+  }
+  await getStorage().putCanvasImage(canvasImage)
+  useStore.getState().setCanvasImages([canvasImage, ...useStore.getState().canvasImages])
+  return canvasId
+}
+
+/** 从画布工作台移除图片 */
+export async function removeCanvasImage(canvasImage: CanvasImage) {
+  const { canvasImages, tasks, inputImages } = useStore.getState()
+  const remaining = canvasImages.filter((ci) => ci.id !== canvasImage.id)
+  useStore.getState().setCanvasImages(remaining)
+  await getStorage().deleteCanvasImage(canvasImage.id)
+
+  const stillUsed = new Set<string>()
+  for (const t of tasks) {
+    for (const id of t.inputImageIds || []) stillUsed.add(id)
+    if (t.maskImageId) stillUsed.add(t.maskImageId)
+    for (const id of t.outputImages || []) stillUsed.add(id)
+  }
+  for (const ci of remaining) stillUsed.add(ci.imageId)
+  for (const img of inputImages) stillUsed.add(img.id)
+  if (!stillUsed.has(canvasImage.imageId)) {
+    await getStorage().deleteImage(canvasImage.imageId)
+    imageCache.delete(canvasImage.imageId)
+  }
+}
+
+/** 将画布图片添加为参考图 */
+export async function addCanvasImageToInput(canvasImage: CanvasImage) {
+  const { inputImages } = useStore.getState()
+  if (inputImages.length >= 16) {
+    useStore.getState().showToast('参考图数量已达上限（16 张），无法继续添加', 'error')
+    return
+  }
+  const dataUrl = await ensureImageCached(canvasImage.imageId)
+  if (!dataUrl) {
+    useStore.getState().showToast('图片数据已不存在', 'error')
+    return
+  }
+  if (inputImages.find((i) => i.id === canvasImage.imageId)) {
+    useStore.getState().showToast('该图片已在参考图中', 'info')
+    return
+  }
+  useStore.getState().addInputImage({ id: canvasImage.imageId, dataUrl })
+  useStore.getState().showToast('已添加到参考图', 'success')
+}
 async function storeImageData(dataUrl: string, source: NonNullable<StoredImage['source']> = 'upload'): Promise<string> {
   const id = await hashDataUrl(dataUrl)
   if (imageCache.has(id)) return id
@@ -709,9 +785,11 @@ export async function clearAllData() {
   const storage = getStorage()
   await storage.clearTasks()
   await storage.clearImages()
+  await storage.clearCanvasImages()
   imageCache.clear()
-  const { setTasks, clearInputImages, clearMaskDraft, setSettings, setParams, showToast } = useStore.getState()
+  const { setTasks, setCanvasImages, clearInputImages, clearMaskDraft, setSettings, setParams, showToast } = useStore.getState()
   setTasks([])
+  setCanvasImages([])
   clearInputImages()
   useStore.setState({ dismissedCodexCliPrompts: [] })
   clearMaskDraft()
@@ -775,11 +853,13 @@ export async function exportData() {
       zipFiles[path] = [bytes, { mtime: new Date(createdAt) }]
     }
 
+    const canvasImages = useStore.getState().canvasImages
     const manifest: ExportData = {
-      version: 2,
+      version: 3,
       exportedAt: new Date(exportedAt).toISOString(),
       settings,
       tasks,
+      canvasImages,
       imageFiles,
     }
 
@@ -829,6 +909,15 @@ export async function importData(file: File) {
       await getStorage().putTask(task)
     }
 
+    // 还原画布图片
+    if (data.canvasImages && data.canvasImages.length > 0) {
+      for (const ci of data.canvasImages) {
+        await getStorage().putCanvasImage(ci)
+      }
+      const canvasImages = await getStorage().getAllCanvasImages()
+      useStore.getState().setCanvasImages(canvasImages)
+    }
+
     if (data.settings) {
       useStore.getState().setSettings(data.settings)
     }
@@ -848,13 +937,14 @@ export async function importData(file: File) {
   }
 }
 
-/** 添加图片到输入（文件上传）—— 仅放入内存缓存，不写 IndexedDB */
+/** 添加图片到输入（文件上传）—— 放入内存缓存并添加到画布 */
 export async function addImageFromFile(file: File): Promise<void> {
   if (!file.type.startsWith('image/')) return
   const dataUrl = await fileToDataUrl(file)
   const id = await hashDataUrl(dataUrl)
   imageCache.set(id, dataUrl)
   useStore.getState().addInputImage({ id, dataUrl })
+  await addImageToCanvas(dataUrl, file.name.replace(/\.[^.]+$/, ''))
 }
 
 /** 添加图片到输入（右键菜单）—— 支持 data/blob/http URL */
@@ -866,6 +956,7 @@ export async function addImageFromUrl(src: string): Promise<void> {
   const id = await hashDataUrl(dataUrl)
   imageCache.set(id, dataUrl)
   useStore.getState().addInputImage({ id, dataUrl })
+  await addImageToCanvas(dataUrl)
 }
 
 function fileToDataUrl(file: File): Promise<string> {

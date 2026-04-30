@@ -58,5 +58,20 @@ export function createApiRoutes(storage: FileStorage, token: string): Hono {
     return c.json({ ok: true })
   })
 
+  api.get('/canvas-images', (c) => c.json(storage.getAllCanvasImages()))
+  api.post('/canvas-images', async (c) => {
+    const item = await c.req.json()
+    storage.putCanvasImage(item)
+    return c.json({ ok: true })
+  })
+  api.delete('/canvas-images/:id', (c) => {
+    storage.deleteCanvasImage(c.req.param('id'))
+    return c.json({ ok: true })
+  })
+  api.delete('/canvas-images', (c) => {
+    storage.clearCanvasImages()
+    return c.json({ ok: true })
+  })
+
   return api
 }
