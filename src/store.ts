@@ -803,6 +803,7 @@ export async function clearAllData() {
   await storage.clearImages()
   await storage.clearCanvasImages()
   imageCache.clear()
+  persistedImageIds.clear()
   const { setTasks, setCanvasImages, clearInputImages, clearMaskDraft, setSettings, setParams, showToast } = useStore.getState()
   setTasks([])
   setCanvasImages([])
