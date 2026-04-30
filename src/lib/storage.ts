@@ -80,9 +80,13 @@ class RemoteStorageAdapter implements StorageAdapter {
   }
 
   async getImage(id: string): Promise<StoredImage | undefined> {
-    const res = await this.request(`/images/${encodeURIComponent(id)}`)
-    if (res.status === 404) return undefined
-    return res.json()
+    try {
+      const res = await this.request(`/images/${encodeURIComponent(id)}`)
+      return res.json()
+    } catch (err: any) {
+      if (err.message?.includes('Storage API error: 404')) return undefined
+      throw err
+    }
   }
 
   async getAllImages(): Promise<StoredImage[]> {
