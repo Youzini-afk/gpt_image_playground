@@ -29,6 +29,7 @@ describe('mask draft lifecycle in store actions', () => {
       settings: { ...DEFAULT_SETTINGS, apiKey: 'test-key' },
       prompt: 'prompt',
       inputImages: [],
+      inputImageIds: [],
       maskDraft: null,
       maskEditorImageId: null,
       params: { ...DEFAULT_PARAMS },
@@ -58,6 +59,23 @@ describe('mask draft lifecycle in store actions', () => {
     await editOutputs(task({ outputImages: [imageA.id] }))
 
     expect(useStore.getState().maskDraft).toEqual(maskDraft)
+  })
+
+  it('keeps persisted input image ids in sync with visible reference images', () => {
+    const imageB = { id: 'image-b', dataUrl: 'data:image/png;base64,b' }
+
+    useStore.getState().addInputImage(imageA)
+    useStore.getState().addInputImage(imageB)
+    expect(useStore.getState().inputImageIds).toEqual(['image-a', 'image-b'])
+
+    useStore.getState().moveInputImage(0, 2)
+    expect(useStore.getState().inputImageIds).toEqual(['image-b', 'image-a'])
+
+    useStore.getState().removeInputImage(0)
+    expect(useStore.getState().inputImageIds).toEqual(['image-a'])
+
+    useStore.getState().clearInputImages()
+    expect(useStore.getState().inputImageIds).toEqual([])
   })
 
   it('clears an invalid mask draft when submit cannot find the mask target image', async () => {

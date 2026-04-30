@@ -27,8 +27,10 @@ WORKDIR /app
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/dist-server ./dist-server
 COPY --from=build /app/package.json ./
+COPY --from=build /app/package-lock.json ./
+COPY --from=build /app/node_modules ./node_modules
 
-RUN npm install --omit=dev hono @hono/node-server
+RUN npm prune --omit=dev
 
 EXPOSE 80
 VOLUME ["/app/data"]

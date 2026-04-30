@@ -3,3 +3,4 @@ dist/
 dist-server/
 dev-proxy.config.json
 data/
+.tmp-storage-check/

@@ -65,6 +65,7 @@ interface AppState {
   prompt: string
   setPrompt: (p: string) => void
   inputImages: InputImage[]
+  inputImageIds: string[]
   addInputImage: (img: InputImage) => void
   removeInputImage: (idx: number) => void
   clearInputImages: () => void
@@ -159,24 +160,28 @@ export const useStore = create<AppState>()(
       prompt: '',
       setPrompt: (prompt) => set({ prompt }),
       inputImages: [],
+      inputImageIds: [],
       addInputImage: (img) =>
         set((s) => {
           if (s.inputImages.find((i) => i.id === img.id)) return s
-          return { inputImages: [...s.inputImages, img] }
+          const inputImages = [...s.inputImages, img]
+          return { inputImages, inputImageIds: inputImages.map((i) => i.id) }
         }),
       removeInputImage: (idx) =>
         set((s) => {
           const removed = s.inputImages[idx]
           const shouldClearMask = removed?.id === s.maskDraft?.targetImageId
+          const inputImages = s.inputImages.filter((_, i) => i !== idx)
           return {
-            inputImages: s.inputImages.filter((_, i) => i !== idx),
+            inputImages,
+            inputImageIds: inputImages.map((img) => img.id),
             ...(shouldClearMask ? { maskDraft: null, maskEditorImageId: null } : {}),
           }
         }),
       clearInputImages: () =>
         set((s) => {
           for (const img of s.inputImages) imageCache.delete(img.id)
-          return { inputImages: [], maskDraft: null, maskEditorImageId: null }
+          return { inputImages: [], inputImageIds: [], maskDraft: null, maskEditorImageId: null }
         }),
       setInputImages: (imgs) =>
         set((s) => {
@@ -185,6 +190,7 @@ export const useStore = create<AppState>()(
             Boolean(s.maskDraft) && !inputImages.some((img) => img.id === s.maskDraft?.targetImageId)
           return {
             inputImages,
+            inputImageIds: inputImages.map((img) => img.id),
             ...(shouldClearMask ? { maskDraft: null, maskEditorImageId: null } : {}),
           }
         }),
@@ -200,14 +206,18 @@ export const useStore = create<AppState>()(
           if (insertIdx === fromIdx) return s
           const [moved] = images.splice(fromIdx, 1)
           images.splice(insertIdx, 0, moved)
-          return { inputImages: images }
+          return { inputImages: images, inputImageIds: images.map((img) => img.id) }
         }),
       maskDraft: null,
       setMaskDraft: (maskDraft) =>
-        set((s) => ({
-          maskDraft,
-          inputImages: orderImagesWithMaskFirst(s.inputImages, maskDraft?.targetImageId),
-        })),
+        set((s) => {
+          const inputImages = orderImagesWithMaskFirst(s.inputImages, maskDraft?.targetImageId)
+          return {
+            maskDraft,
+            inputImages,
+            inputImageIds: inputImages.map((img) => img.id),
+          }
+        }),
       clearMaskDraft: () => set({ maskDraft: null }),
       maskEditorImageId: null,
       setMaskEditorImageId: (maskEditorImageId) => set({ maskEditorImageId }),
@@ -277,6 +287,8 @@ export const useStore = create<AppState>()(
       partialize: (state) => ({
         settings: state.settings,
         params: state.params,
+        inputImageIds: state.inputImageIds,
+        maskDraft: state.maskDraft,
         dismissedCodexCliPrompts: state.dismissedCodexCliPrompts,
       }),
     },
@@ -350,6 +362,8 @@ function normalizeParamsForSettings(params: TaskParams, settings: AppSettings): 
 export async function initStore() {
   try {
     const storage = getStorage()
+    const savedInputImageIds = [...useStore.getState().inputImageIds]
+    const savedMaskDraft = useStore.getState().maskDraft
     const tasks = await storage.getAllTasks()
     useStore.getState().setTasks(tasks)
 
@@ -373,6 +387,23 @@ export async function initStore() {
         persistedImageIds.add(img.id)
       } else {
         await storage.deleteImage(img.id).catch(() => {})
+      }
+    }
+
+    const restoredInputs: InputImage[] = []
+    for (const id of savedInputImageIds) {
+      const dataUrl = await ensureImageCached(id)
+      if (dataUrl) restoredInputs.push({ id, dataUrl })
+    }
+    useStore.getState().setInputImages(restoredInputs)
+
+    if (savedMaskDraft) {
+      const hasTarget = restoredInputs.some((img) => img.id === savedMaskDraft.targetImageId)
+      const maskDataUrl = hasTarget ? await ensureImageCached(await storeImageData(savedMaskDraft.maskDataUrl, 'mask')) : undefined
+      if (hasTarget && maskDataUrl) {
+        useStore.getState().setMaskDraft(savedMaskDraft)
+      } else {
+        useStore.getState().clearMaskDraft()
       }
     }
   } catch (err) {
@@ -973,9 +1004,9 @@ export async function addImageFromFile(file: File): Promise<void> {
   if (!file.type.startsWith('image/')) return
   const dataUrl = await fileToDataUrl(file)
   const id = await hashDataUrl(dataUrl)
+  await addImageToCanvas(dataUrl, file.name.replace(/\.[^.]+$/, ''))
   imageCache.set(id, dataUrl)
   useStore.getState().addInputImage({ id, dataUrl })
-  await addImageToCanvas(dataUrl, file.name.replace(/\.[^.]+$/, ''))
 }
 
 /** 添加图片到输入（右键菜单）—— 支持 data/blob/http URL */
@@ -985,9 +1016,9 @@ export async function addImageFromUrl(src: string): Promise<void> {
   if (!blob.type.startsWith('image/')) throw new Error('不是有效的图片')
   const dataUrl = await blobToDataUrl(blob)
   const id = await hashDataUrl(dataUrl)
+  await addImageToCanvas(dataUrl)
   imageCache.set(id, dataUrl)
   useStore.getState().addInputImage({ id, dataUrl })
-  await addImageToCanvas(dataUrl)
 }
 
 function fileToDataUrl(file: File): Promise<string> {
