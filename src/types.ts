@@ -2,7 +2,7 @@
 
 export type ApiMode = 'images' | 'responses'
 
-export type StorageMode = 'local' | 'remote'
+export type StorageMode = 'local' | 'server'
 
 export interface AppSettings {
   baseUrl: string
@@ -13,8 +13,6 @@ export interface AppSettings {
   codexCli: boolean
   apiProxy: boolean
   storageMode: StorageMode
-  storageUrl: string
-  storageToken: string
 }
 
 const DEFAULT_BASE_URL = import.meta.env.VITE_DEFAULT_API_URL?.trim() || 'https://api.openai.com/v1'
@@ -30,8 +28,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   codexCli: false,
   apiProxy: false,
   storageMode: 'local',
-  storageUrl: '',
-  storageToken: '',
 }
 
 // ===== 任务参数 =====

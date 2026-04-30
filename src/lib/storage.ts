@@ -1,7 +1,7 @@
 import type { TaskRecord, StoredImage, CanvasImage } from '../types'
 import * as localDb from './db'
 
-export type StorageMode = 'local' | 'remote'
+export type StorageMode = 'local' | 'server'
 
 export interface StorageAdapter {
   getAllTasks(): Promise<TaskRecord[]>
@@ -35,24 +35,18 @@ class LocalStorageAdapter implements StorageAdapter {
   clearCanvasImages() { return localDb.clearCanvasImages().then(() => {}) }
 }
 
-class RemoteStorageAdapter implements StorageAdapter {
+class ServerStorageAdapter implements StorageAdapter {
   private baseUrl: string
-  private token: string
 
-  constructor(url: string, token: string) {
-    this.baseUrl = url.replace(/\/+$/, '')
-    this.token = token
+  constructor() {
+    this.baseUrl = `${window.location.origin}/api/storage`
   }
 
   private async request(path: string, options?: RequestInit): Promise<Response> {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-    if (this.token) {
-      headers['Authorization'] = `Bearer ${this.token}`
-    }
-    const isSameOrigin = this.baseUrl === window.location.origin
-    const response = await fetch(`${this.baseUrl}/api/storage${path}`, {
+    const response = await fetch(`${this.baseUrl}${path}`, {
       ...options,
-      credentials: isSameOrigin ? 'include' : 'same-origin',
+      credentials: 'include',
       headers: { ...headers, ...(options?.headers as Record<string, string> || {}) },
     })
     if (!response.ok) {
@@ -130,21 +124,17 @@ export function getStorage(): StorageAdapter {
   return currentAdapter
 }
 
-export function setStorageMode(mode: StorageMode, url?: string, token?: string) {
-  if (mode === 'remote' && url) {
-    currentAdapter = new RemoteStorageAdapter(url, token || '')
+export function setStorageMode(mode: StorageMode) {
+  if (mode === 'server') {
+    currentAdapter = new ServerStorageAdapter()
   } else {
     currentAdapter = new LocalStorageAdapter()
   }
 }
 
-export async function testConnection(url: string, token?: string): Promise<{ ok: boolean; error?: string }> {
+export async function testServerStorage(): Promise<{ ok: boolean; error?: string }> {
   try {
-    const baseUrl = url.replace(/\/+$/, '')
-    const headers: Record<string, string> = {}
-    if (token) headers['Authorization'] = `Bearer ${token}`
-    const isSameOrigin = baseUrl === window.location.origin
-    const res = await fetch(`${baseUrl}/api/storage/ping`, { headers, credentials: isSameOrigin ? 'include' : 'same-origin' })
+    const res = await fetch(`${window.location.origin}/api/storage/ping`, { credentials: 'include' })
     if (!res.ok) return { ok: false, error: `HTTP ${res.status}` }
     const data = await res.json()
     return { ok: !!data.ok }

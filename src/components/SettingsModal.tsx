@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { normalizeBaseUrl } from '../lib/api'
 import { isApiProxyAvailable, readClientDevProxyConfig } from '../lib/devProxy'
-import { testConnection } from '../lib/storage'
+import { testServerStorage } from '../lib/storage'
 import { useStore, exportData, importData, clearAllData, switchStorageMode } from '../store'
-import { DEFAULT_IMAGES_MODEL, DEFAULT_RESPONSES_MODEL, DEFAULT_SETTINGS, type AppSettings, type StorageMode } from '../types'
+import { DEFAULT_IMAGES_MODEL, DEFAULT_RESPONSES_MODEL, DEFAULT_SETTINGS, type AppSettings } from '../types'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 import Select from './Select'
 
@@ -17,7 +17,6 @@ export default function SettingsModal() {
   const [draft, setDraft] = useState<AppSettings>(settings)
   const [timeoutInput, setTimeoutInput] = useState(String(settings.timeout))
   const [showApiKey, setShowApiKey] = useState(false)
-  const [showStorageToken, setShowStorageToken] = useState(false)
   const [testingConnection, setTestingConnection] = useState(false)
   const [connectionResult, setConnectionResult] = useState<{ ok: boolean; error?: string } | null>(null)
   const apiProxyAvailable = isApiProxyAvailable(readClientDevProxyConfig())
@@ -293,114 +292,49 @@ export default function SettingsModal() {
                 <Select
                   value={draft.storageMode ?? 'local'}
                   onChange={async (value) => {
-                    const storageMode = value as StorageMode
+                    const storageMode = value as 'local' | 'server'
                     const nextDraft = { ...draft, storageMode }
                     setDraft(nextDraft)
                     commitSettings(nextDraft)
                     setConnectionResult(null)
-                    await switchStorageMode(
-                      storageMode,
-                      nextDraft.storageUrl || window.location.origin,
-                      nextDraft.storageToken,
-                    )
+                    if (storageMode === 'server') {
+                      setTestingConnection(true)
+                      const result = await testServerStorage()
+                      setConnectionResult(result)
+                      setTestingConnection(false)
+                      if (result.ok) {
+                        await switchStorageMode('server')
+                      }
+                    } else {
+                      await switchStorageMode('local')
+                    }
                   }}
                   options={[
                     { label: '本地存储（浏览器 IndexedDB）', value: 'local' },
-                    { label: '服务端存储', value: 'remote' },
+                    { label: '服务端存储', value: 'server' },
                   ]}
                   className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
                 />
                 <div data-selectable-text className="mt-1 text-[10px] text-gray-400 dark:text-gray-500">
-                  {draft.storageMode === 'remote'
-                    ? '数据存储在服务端，可在不同设备间同步。'
+                  {draft.storageMode === 'server'
+                    ? '数据存储在服务端，自动使用当前部署的后端，无需额外配置。'
                     : '数据存储在浏览器中，清除浏览器数据会丢失记录。'}
                 </div>
               </label>
 
-              {draft.storageMode === 'remote' && (
-                <>
-                  <label className="block">
-                    <span className="block text-xs text-gray-500 dark:text-gray-400 mb-1">服务端地址</span>
-                    <input
-                      value={draft.storageUrl}
-                      onChange={(e) => setDraft((prev) => ({ ...prev, storageUrl: e.target.value }))}
-                      onBlur={(e) => {
-                        const nextDraft = { ...draft, storageUrl: e.target.value }
-                        setDraft(nextDraft)
-                        commitSettings(nextDraft)
-                        setConnectionResult(null)
-                      }}
-                      type="text"
-                      placeholder={window.location.origin}
-                      className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
-                    />
-                  </label>
-
-                  <div className="block">
-                    <span className="block text-xs text-gray-500 dark:text-gray-400 mb-1">访问令牌</span>
-                    <div className="relative">
-                      <input
-                        value={draft.storageToken}
-                        onChange={(e) => setDraft((prev) => ({ ...prev, storageToken: e.target.value }))}
-                        onBlur={(e) => {
-                          const nextDraft = { ...draft, storageToken: e.target.value }
-                          setDraft(nextDraft)
-                          commitSettings(nextDraft)
-                          setConnectionResult(null)
-                        }}
-                        type={showStorageToken ? 'text' : 'password'}
-                        placeholder="可选，服务端设置了 STORAGE_TOKEN 时填写"
-                        className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2 pr-10 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setShowStorageToken((v) => !v)}
-                        className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-400 hover:text-gray-600 transition-colors"
-                        tabIndex={-1}
-                      >
-                        {showStorageToken ? (
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
-                            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-                            <circle cx="12" cy="12" r="3" />
-                          </svg>
-                        ) : (
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
-                            <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94" />
-                            <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19" />
-                            <path d="M14.12 14.12a3 3 0 1 1-4.24-4.24" />
-                            <line x1="1" y1="1" x2="23" y2="23" />
-                          </svg>
-                        )}
-                      </button>
-                    </div>
-                  </div>
-
-                  <button
-                    onClick={async () => {
-                      setTestingConnection(true)
-                      setConnectionResult(null)
-                      const url = draft.storageUrl || window.location.origin
-                      const result = await testConnection(url, draft.storageToken)
-                      setConnectionResult(result)
-                      setTestingConnection(false)
-                      if (result.ok) {
-                        await switchStorageMode('remote', url, draft.storageToken)
-                      }
-                    }}
-                    disabled={testingConnection}
-                    className="w-full rounded-xl bg-blue-50 dark:bg-blue-500/10 px-4 py-2.5 text-sm text-blue-600 dark:text-blue-400 transition hover:bg-blue-100 dark:hover:bg-blue-500/20 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
-                  >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                    </svg>
-                    {testingConnection ? '测试中...' : '测试连接'}
-                  </button>
-                  {connectionResult && (
-                    <div className={`text-xs px-3 py-2 rounded-lg ${connectionResult.ok ? 'bg-green-50 text-green-600 dark:bg-green-500/10 dark:text-green-400' : 'bg-red-50 text-red-600 dark:bg-red-500/10 dark:text-red-400'}`}>
-                      {connectionResult.ok ? '连接成功' : `连接失败：${connectionResult.error}`}
-                    </div>
-                  )}
-                </>
+              {draft.storageMode === 'server' && testingConnection && (
+                <div className="text-xs px-3 py-2 rounded-lg bg-blue-50 dark:bg-blue-500/10 text-blue-600 dark:text-blue-400 flex items-center gap-1.5">
+                  <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                  正在连接服务端...
+                </div>
+              )}
+              {draft.storageMode === 'server' && connectionResult && !testingConnection && (
+                <div className={`text-xs px-3 py-2 rounded-lg ${connectionResult.ok ? 'bg-green-50 text-green-600 dark:bg-green-500/10 dark:text-green-400' : 'bg-red-50 text-red-600 dark:bg-red-500/10 dark:text-red-400'}`}>
+                  {connectionResult.ok ? '服务端连接成功' : `连接失败：${connectionResult.error}`}
+                </div>
               )}
             </div>
           </section>

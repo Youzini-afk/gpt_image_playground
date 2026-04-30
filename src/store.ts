@@ -290,12 +290,12 @@ function genId(): string {
 /** Initialize storage mode based on settings */
 export function initStorageMode() {
   const { settings } = useStore.getState()
-  setStorageMode(settings.storageMode, settings.storageUrl || window.location.origin, settings.storageToken)
+  setStorageMode(settings.storageMode)
 }
 
 /** Switch storage mode and reload data from the new backend */
-export async function switchStorageMode(mode: 'local' | 'remote', url?: string, token?: string) {
-  setStorageMode(mode, url || window.location.origin, token || '')
+export async function switchStorageMode(mode: 'local' | 'server') {
+  setStorageMode(mode)
   imageCache.clear()
   persistedImageIds.clear()
   await initStore()
