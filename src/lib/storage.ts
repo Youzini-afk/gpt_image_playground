@@ -49,8 +49,10 @@ class RemoteStorageAdapter implements StorageAdapter {
     if (this.token) {
       headers['Authorization'] = `Bearer ${this.token}`
     }
+    const isSameOrigin = this.baseUrl === window.location.origin
     const response = await fetch(`${this.baseUrl}/api/storage${path}`, {
       ...options,
+      credentials: isSameOrigin ? 'include' : 'same-origin',
       headers: { ...headers, ...(options?.headers as Record<string, string> || {}) },
     })
     if (!response.ok) {
@@ -137,7 +139,8 @@ export async function testConnection(url: string, token?: string): Promise<{ ok:
     const baseUrl = url.replace(/\/+$/, '')
     const headers: Record<string, string> = {}
     if (token) headers['Authorization'] = `Bearer ${token}`
-    const res = await fetch(`${baseUrl}/api/storage/ping`, { headers })
+    const isSameOrigin = baseUrl === window.location.origin
+    const res = await fetch(`${baseUrl}/api/storage/ping`, { headers, credentials: isSameOrigin ? 'include' : 'same-origin' })
     if (!res.ok) return { ok: false, error: `HTTP ${res.status}` }
     const data = await res.json()
     return { ok: !!data.ok }

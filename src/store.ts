@@ -330,30 +330,34 @@ function normalizeParamsForSettings(params: TaskParams, settings: AppSettings): 
 
 /** 初始化：从存储加载任务和图片缓存，清理孤立图片 */
 export async function initStore() {
-  const storage = getStorage()
-  const tasks = await storage.getAllTasks()
-  useStore.getState().setTasks(tasks)
+  try {
+    const storage = getStorage()
+    const tasks = await storage.getAllTasks()
+    useStore.getState().setTasks(tasks)
 
-  const canvasImages = await storage.getAllCanvasImages()
-  useStore.getState().setCanvasImages(canvasImages)
+    const canvasImages = await storage.getAllCanvasImages()
+    useStore.getState().setCanvasImages(canvasImages)
 
-  const referencedIds = new Set<string>()
-  for (const t of tasks) {
-    for (const id of t.inputImageIds || []) referencedIds.add(id)
-    if (t.maskImageId) referencedIds.add(t.maskImageId)
-    for (const id of t.outputImages || []) referencedIds.add(id)
-  }
-  for (const ci of canvasImages) {
-    referencedIds.add(ci.imageId)
-  }
-
-  const images = await storage.getAllImages()
-  for (const img of images) {
-    if (referencedIds.has(img.id)) {
-      imageCache.set(img.id, img.dataUrl)
-    } else {
-      await storage.deleteImage(img.id)
+    const referencedIds = new Set<string>()
+    for (const t of tasks) {
+      for (const id of t.inputImageIds || []) referencedIds.add(id)
+      if (t.maskImageId) referencedIds.add(t.maskImageId)
+      for (const id of t.outputImages || []) referencedIds.add(id)
     }
+    for (const ci of canvasImages) {
+      referencedIds.add(ci.imageId)
+    }
+
+    const images = await storage.getAllImages()
+    for (const img of images) {
+      if (referencedIds.has(img.id)) {
+        imageCache.set(img.id, img.dataUrl)
+      } else {
+        await storage.deleteImage(img.id).catch(() => {})
+      }
+    }
+  } catch (err) {
+    console.error('initStore failed:', err)
   }
 }
 
@@ -613,7 +617,7 @@ export function updateTaskInStore(taskId: string, patch: Partial<TaskRecord>) {
   )
   setTasks(updated)
   const task = updated.find((t) => t.id === taskId)
-  if (task) getStorage().putTask(task)
+  if (task) getStorage().putTask(task).catch((err) => console.error('putTask failed:', err))
 }
 
 /** 重试失败的任务：创建新任务并执行 */

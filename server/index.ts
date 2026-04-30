@@ -31,6 +31,11 @@ if (accessPassword) {
       return next()
     }
 
+    const authHeader = c.req.header('Authorization')
+    if (authHeader === `Bearer ${storageToken}` && storageToken) {
+      return next()
+    }
+
     if (path.startsWith('/api/')) {
       return c.json({ error: 'Unauthorized' }, 401)
     }
@@ -52,7 +57,7 @@ if (accessPassword) {
       setCookie(c, 'auth_token', accessPassword, {
         path: '/',
         httpOnly: true,
-        sameSite: 'Strict',
+        sameSite: 'Lax',
         maxAge: 60 * 60 * 24 * 30,
       })
       return c.json({ ok: true })
@@ -64,7 +69,7 @@ if (accessPassword) {
     setCookie(c, 'auth_token', '', {
       path: '/',
       httpOnly: true,
-      sameSite: 'Strict',
+      sameSite: 'Lax',
       maxAge: 0,
     })
     return c.json({ ok: true })
