@@ -88,6 +88,13 @@ app.use('/api/storage/*', cors({
   maxAge: 86400,
 }))
 
+app.use('/api/storage/*', async (c, next) => {
+  c.header('Cache-Control', 'no-store, no-cache, max-age=0, must-revalidate')
+  c.header('Pragma', 'no-cache')
+  c.header('Expires', '0')
+  await next()
+})
+
 app.route('/api/storage', createApiRoutes(storage))
 
 if (enableApiProxy) {

@@ -295,6 +295,30 @@ export const useStore = create<AppState>()(
   ),
 )
 
+export async function waitForStoreHydration(): Promise<void> {
+  const persistApi = useStore.persist
+  if (persistApi.hasHydrated()) return
+
+  await new Promise<void>((resolve) => {
+    const unsubscribe = persistApi.onFinishHydration(() => {
+      unsubscribe()
+      resolve()
+    })
+
+    const result = persistApi.rehydrate()
+    if (result instanceof Promise) {
+      result.catch((err) => {
+        console.error('store hydration failed:', err)
+      })
+    }
+
+    if (persistApi.hasHydrated()) {
+      unsubscribe()
+      resolve()
+    }
+  })
+}
+
 // ===== Actions =====
 
 let uid = 0
@@ -387,8 +411,6 @@ export async function initStore() {
       if (referencedIds.has(img.id)) {
         imageCache.set(img.id, img.dataUrl)
         persistedImageIds.add(img.id)
-      } else {
-        await storage.deleteImage(img.id).catch(() => {})
       }
     }
 

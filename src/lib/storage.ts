@@ -46,6 +46,7 @@ class ServerStorageAdapter implements StorageAdapter {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     const response = await fetch(`${this.baseUrl}${path}`, {
       ...options,
+      cache: 'no-store',
       credentials: 'include',
       headers: { ...headers, ...(options?.headers as Record<string, string> || {}) },
     })
@@ -134,7 +135,10 @@ export function setStorageMode(mode: StorageMode) {
 
 export async function testServerStorage(): Promise<{ ok: boolean; error?: string }> {
   try {
-    const res = await fetch(`${window.location.origin}/api/storage/ping`, { credentials: 'include' })
+    const res = await fetch(`${window.location.origin}/api/storage/ping`, {
+      cache: 'no-store',
+      credentials: 'include',
+    })
     if (!res.ok) return { ok: false, error: `HTTP ${res.status}` }
     const data = await res.json()
     return { ok: !!data.ok }
