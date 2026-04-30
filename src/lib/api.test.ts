@@ -8,6 +8,32 @@ describe('callImageApi', () => {
     vi.unstubAllEnvs()
   })
 
+  it.each([false, true])(
+    'adds the prompt rewrite guard on Responses API when Codex CLI mode is %s',
+    async (codexCli) => {
+      const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+        output: [{
+          type: 'image_generation_call',
+          result: 'aW1hZ2U=',
+        }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+
+      await callImageApi({
+        settings: { ...DEFAULT_SETTINGS, apiKey: 'test-key', apiMode: 'responses', codexCli },
+        prompt: 'prompt',
+        params: { ...DEFAULT_PARAMS },
+        inputImageDataUrls: [],
+      })
+
+      const [, init] = fetchMock.mock.calls[0]
+      const body = JSON.parse(String((init as RequestInit).body))
+      expect(body.input).toBe('Use the following text as the complete prompt. Do not rewrite it:\nprompt')
+    },
+  )
+
   it('records actual params returned on Images API responses in Codex CLI mode', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
       output_format: 'png',

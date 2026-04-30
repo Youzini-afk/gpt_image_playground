@@ -1,5 +1,7 @@
 // ===== 设置 =====
 
+import { readRuntimeEnv } from './lib/runtimeEnv'
+
 export type ApiMode = 'images' | 'responses'
 
 export type StorageMode = 'local' | 'server'
@@ -15,7 +17,7 @@ export interface AppSettings {
   storageMode: StorageMode
 }
 
-const DEFAULT_BASE_URL = import.meta.env.VITE_DEFAULT_API_URL?.trim() || 'https://api.openai.com/v1'
+const DEFAULT_BASE_URL = readRuntimeEnv(import.meta.env.VITE_DEFAULT_API_URL) || 'https://api.openai.com/v1'
 export const DEFAULT_IMAGES_MODEL = 'gpt-image-2'
 export const DEFAULT_RESPONSES_MODEL = 'gpt-5.5'
 

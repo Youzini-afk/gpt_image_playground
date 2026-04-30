@@ -120,6 +120,9 @@ interface AppState {
     title: string
     message: string
     confirmText?: string
+    showCancel?: boolean
+    icon?: 'info'
+    minConfirmDelayMs?: number
     messageAlign?: 'left' | 'center'
     tone?: 'danger' | 'warning'
     action: () => void
