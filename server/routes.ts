@@ -1,17 +1,8 @@
 import { Hono } from 'hono'
 import type { FileStorage } from './storage'
 
-export function createApiRoutes(storage: FileStorage, token: string): Hono {
+export function createApiRoutes(storage: FileStorage): Hono {
   const api = new Hono()
-
-  api.use('*', async (c, next) => {
-    if (!token) return next()
-    const auth = c.req.header('Authorization')
-    if (auth !== `Bearer ${token}`) {
-      return c.json({ error: 'Unauthorized' }, 401)
-    }
-    await next()
-  })
 
   api.get('/ping', (c) => c.json({ ok: true }))
 

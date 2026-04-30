@@ -88,7 +88,7 @@ app.use('/api/storage/*', cors({
   maxAge: 86400,
 }))
 
-app.route('/api/storage', createApiRoutes(storage, storageToken))
+app.route('/api/storage', createApiRoutes(storage))
 
 if (enableApiProxy) {
   const allowedPaths = /^\/(v1\/)?(images\/generations|images\/edits|responses)$/
