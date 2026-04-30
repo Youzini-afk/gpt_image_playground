@@ -23,6 +23,8 @@ import { zipSync, unzipSync, strToU8, strFromU8 } from 'fflate'
 // 内存缓存，id → dataUrl，避免每次从 IndexedDB 读取
 
 const imageCache = new Map<string, string>()
+// 已持久化到 storage 的 image id 集合（与 imageCache 不同，imageCache 只代表内存缓存）
+const persistedImageIds = new Set<string>()
 
 export function getCachedImage(id: string): string | undefined {
   return imageCache.get(id)
@@ -34,6 +36,7 @@ export async function ensureImageCached(id: string): Promise<string | undefined>
   const rec = await storage.getImage(id)
   if (rec) {
     imageCache.set(id, rec.dataUrl)
+    persistedImageIds.add(id)
     return rec.dataUrl
   }
   return undefined
@@ -294,6 +297,7 @@ export function initStorageMode() {
 export async function switchStorageMode(mode: 'local' | 'remote', url?: string, token?: string) {
   setStorageMode(mode, url || window.location.origin, token || '')
   imageCache.clear()
+  persistedImageIds.clear()
   await initStore()
 }
 
@@ -352,6 +356,7 @@ export async function initStore() {
     for (const img of images) {
       if (referencedIds.has(img.id)) {
         imageCache.set(img.id, img.dataUrl)
+        persistedImageIds.add(img.id)
       } else {
         await storage.deleteImage(img.id).catch(() => {})
       }
@@ -401,6 +406,7 @@ export async function removeCanvasImage(canvasImage: CanvasImage) {
   if (!stillUsed.has(canvasImage.imageId)) {
     await getStorage().deleteImage(canvasImage.imageId)
     imageCache.delete(canvasImage.imageId)
+    persistedImageIds.delete(canvasImage.imageId)
   }
 }
 
@@ -425,12 +431,16 @@ export async function addCanvasImageToInput(canvasImage: CanvasImage) {
 }
 async function storeImageData(dataUrl: string, source: NonNullable<StoredImage['source']> = 'upload'): Promise<string> {
   const id = await hashDataUrl(dataUrl)
-  if (imageCache.has(id)) return id
+  if (persistedImageIds.has(id)) {
+    imageCache.set(id, dataUrl)
+    return id
+  }
   const storage = getStorage()
   const existing = await storage.getImage(id)
   if (!existing) {
     await storage.putImage({ id, dataUrl, createdAt: Date.now(), source })
   }
+  persistedImageIds.add(id)
   imageCache.set(id, dataUrl)
   return id
 }
@@ -736,6 +746,7 @@ export async function removeMultipleTasks(taskIds: string[]) {
     if (!stillUsed.has(imgId)) {
       await storage.deleteImage(imgId)
       imageCache.delete(imgId)
+      persistedImageIds.delete(imgId)
     }
   }
 
@@ -778,6 +789,7 @@ export async function removeTask(task: TaskRecord) {
     if (!stillUsed.has(imgId)) {
       await getStorage().deleteImage(imgId)
       imageCache.delete(imgId)
+      persistedImageIds.delete(imgId)
     }
   }
 
