@@ -148,7 +148,12 @@ describe('callImageApi', () => {
 
     expect(fetchMock).toHaveBeenCalledWith(
       '/api-proxy/images/generations',
-      expect.objectContaining({ method: 'POST' }),
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          'X-GIP-API-Base-URL': 'https://youzicoex.zeabur.app/v1',
+        }),
+      }),
     )
   })
 
@@ -182,7 +187,12 @@ describe('callImageApi', () => {
 
     expect(fetchMock).toHaveBeenCalledWith(
       '/api-proxy/images/edits',
-      expect.objectContaining({ method: 'POST' }),
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          'X-GIP-API-Base-URL': 'https://youzicoex.zeabur.app/v1',
+        }),
+      }),
     )
     expect((fetchMock.mock.calls.find(([url]) => url === '/api-proxy/images/edits')?.[1] as RequestInit).body)
       .toBeInstanceOf(FormData)

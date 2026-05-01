@@ -1,6 +1,6 @@
 import type { AppSettings, ImageApiResponse, ResponsesApiResponse, TaskParams } from '../types'
 import { dataUrlToBlob, imageDataUrlToPngBlob, maskDataUrlToPngBlob } from './canvasImage'
-import { buildApiUrl, readClientDevProxyConfig, shouldUseApiProxy } from './devProxy'
+import { API_PROXY_TARGET_HEADER, buildApiUrl, normalizeBaseUrl, readClientDevProxyConfig, shouldUseApiProxy } from './devProxy'
 
 const MIME_MAP: Record<string, string> = {
   png: 'image/png',
@@ -113,12 +113,21 @@ async function getApiErrorMessage(response: Response): Promise<string> {
   return errorMsg
 }
 
-function createRequestHeaders(settings: AppSettings): Record<string, string> {
-  return {
+function createRequestHeaders(settings: AppSettings, useApiProxy = false): Record<string, string> {
+  const headers = {
     Authorization: `Bearer ${settings.apiKey}`,
     'Cache-Control': 'no-store, no-cache, max-age=0',
     Pragma: 'no-cache',
   }
+
+  if (useApiProxy) {
+    const baseUrl = normalizeBaseUrl(settings.baseUrl)
+    if (baseUrl) {
+      return { ...headers, [API_PROXY_TARGET_HEADER]: baseUrl }
+    }
+  }
+
+  return headers
 }
 
 function getErrorMessage(error: unknown): string {
@@ -144,7 +153,7 @@ function createFetchFailureMessage(
   if (useApiProxy) {
     return [
       `浏览器无法连接 API 代理：${requestUrl}`,
-      '请检查当前部署的 API 代理是否正常、ENABLE_API_PROXY 是否为 true，以及 API_PROXY_URL 是否能从服务器访问。',
+      '请检查当前部署的 API 代理是否正常、ENABLE_API_PROXY 是否为 true，以及设置中的 API URL 是否能从服务器访问。',
       `原始错误：${originalMessage}`,
     ].join('\n')
   }
@@ -358,7 +367,7 @@ async function callImagesApiSingle(opts: CallApiOptions): Promise<CallApiResult>
   const mime = MIME_MAP[params.output_format] || 'image/png'
   const proxyConfig = readClientDevProxyConfig()
   const useApiProxy = shouldUseApiProxy(settings.apiProxy, proxyConfig)
-  const requestHeaders = createRequestHeaders(settings)
+  const requestHeaders = createRequestHeaders(settings, useApiProxy)
 
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), settings.timeout * 1000)
@@ -537,7 +546,7 @@ async function callResponsesImageApiSingle(opts: CallApiOptions): Promise<CallAp
   const mime = MIME_MAP[params.output_format] || 'image/png'
   const proxyConfig = readClientDevProxyConfig()
   const useApiProxy = shouldUseApiProxy(settings.apiProxy, proxyConfig)
-  const requestHeaders = createRequestHeaders(settings)
+  const requestHeaders = createRequestHeaders(settings, useApiProxy)
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), settings.timeout * 1000)
 

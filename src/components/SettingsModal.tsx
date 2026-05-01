@@ -145,13 +145,12 @@ export default function SettingsModal() {
                   onChange={(e) => setDraft((prev) => ({ ...prev, baseUrl: e.target.value }))}
                   onBlur={(e) => commitSettings({ ...draft, baseUrl: e.target.value })}
                   type="text"
-                  disabled={apiProxyEnabled}
                   placeholder={DEFAULT_SETTINGS.baseUrl}
-                  className={`w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50 ${apiProxyEnabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
                 />
                 <div data-selectable-text className="mt-1 min-h-[22px] flex items-center text-[10px] text-gray-400 dark:text-gray-500">
                   {apiProxyEnabled ? (
-                    <span className="text-yellow-600 dark:text-yellow-500">已开启代理，实际请求目标由部署端决定，此处设置被忽略。</span>
+                    <span className="text-yellow-600 dark:text-yellow-500">已开启代理，浏览器请求同源后端，后端会转发到此处填写的 API URL。</span>
                   ) : (
                     <span>支持通过查询参数覆盖：<code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">?apiUrl=</code>，<code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">codexCli=true</code></span>
                   )}
@@ -182,7 +181,7 @@ export default function SettingsModal() {
                   <div data-selectable-text className="text-[10px] text-gray-400 dark:text-gray-500">
                     {apiProxyForced
                       ? '当前 Docker/Zeabur 部署已强制使用同源代理，浏览器不会直连外部 API。'
-                      : '由当前部署提供同源代理，用于解决浏览器跨域限制；开启后 API URL 设置会被忽略。'}
+                      : '由当前部署提供同源代理，用于解决浏览器跨域限制；开启后后端会转发到上方 API URL。'}
                   </div>
                 </div>
               )}

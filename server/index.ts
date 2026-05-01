@@ -5,13 +5,14 @@ import { cors } from 'hono/cors'
 import { getCookie, setCookie } from 'hono/cookie'
 import { FileStorage } from './storage'
 import { createApiRoutes } from './routes'
+import { API_PROXY_TARGET_HEADER, buildProxyTargetUrl } from './proxy'
 
 const port = parseInt(process.env.PORT || '80', 10)
 const host = process.env.HOST || '0.0.0.0'
 const dataDir = process.env.DATA_DIR || './data'
 const storageToken = process.env.STORAGE_TOKEN || ''
 const accessPassword = process.env.ACCESS_PASSWORD || ''
-const apiUrl = (process.env.API_PROXY_URL || process.env.API_URL || 'https://api.openai.com').replace(/\/+$/, '')
+const apiUrl = (process.env.API_PROXY_URL || process.env.API_URL || 'https://api.openai.com/v1').replace(/\/+$/, '')
 const enableApiProxy = process.env.API_PROXY === 'true' || process.env.ENABLE_API_PROXY === 'true'
 
 const storage = new FileStorage(dataDir)
@@ -107,13 +108,17 @@ if (enableApiProxy) {
     if (c.req.method !== 'POST' && c.req.method !== 'OPTIONS') {
       return c.json({ error: 'Forbidden: Only POST and OPTIONS allowed' }, 403)
     }
-    const proxyPath = path.replace(/^\/+/, '')
-    const targetPath = apiUrl.endsWith('/v1') && proxyPath.startsWith('v1/')
-      ? proxyPath.slice('v1/'.length)
-      : proxyPath
-    const targetUrl = `${apiUrl}/${targetPath}`
+    const targetUrl = buildProxyTargetUrl({
+      defaultBaseUrl: apiUrl,
+      requestPath: path,
+      clientBaseUrl: c.req.header(API_PROXY_TARGET_HEADER),
+    })
+    if (!targetUrl) {
+      return c.json({ error: 'Invalid API proxy target URL' }, 400)
+    }
     const headers = new Headers(c.req.raw.headers)
     headers.delete('host')
+    headers.delete(API_PROXY_TARGET_HEADER)
     headers.set('Access-Control-Allow-Origin', '*')
     const init: RequestInit & { duplex?: 'half' } = { method: c.req.method, headers }
     if (c.req.method !== 'GET' && c.req.method !== 'HEAD') {

@@ -9,6 +9,7 @@ export interface DevProxyConfig {
 }
 
 const DEFAULT_PROXY_PREFIX = '/api-proxy'
+export const API_PROXY_TARGET_HEADER = 'X-GIP-API-Base-URL'
 
 export function normalizeBaseUrl(baseUrl: string): string {
   const trimmed = baseUrl.trim()
