@@ -138,6 +138,18 @@ services:
     restart: unless-stopped
 ```
 
+**3. Zeabur 部署提示**
+
+Zeabur 会自动检测并使用仓库根目录的 `Dockerfile`。在 Zeabur 服务的环境变量中建议配置：
+
+```env
+DEFAULT_API_URL=https://api.openai.com/v1
+ENABLE_API_PROXY=true
+API_PROXY_URL=https://api.openai.com/v1
+```
+
+部署完成后，在页面设置中开启 **API 代理**。这样浏览器会请求同源 `/api-proxy/`，由 Zeabur 容器转发到 `API_PROXY_URL`，避免浏览器直连接口时触发 CORS 或 HTTPS/HTTP 混合内容限制。
+
 **更新说明：**
 
 使用 `latest` 标签时，重新拉取镜像并重启即可更新（如 `docker compose pull && docker compose up -d`）。若需固定版本可使用官方提供的版本号标签（如 `0.2.x`）。

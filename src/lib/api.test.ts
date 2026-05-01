@@ -150,4 +150,53 @@ describe('callImageApi', () => {
       expect.objectContaining({ method: 'POST' }),
     )
   })
+
+  it('adds deployment guidance when the browser cannot reach the API request', async () => {
+    vi.stubEnv('VITE_API_PROXY_AVAILABLE', 'false')
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('Failed to fetch'))
+
+    await expect(callImageApi({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        apiKey: 'test-key',
+        baseUrl: 'https://api.openai.com/v1',
+      },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS },
+      inputImageDataUrls: [],
+    })).rejects.toThrow(/浏览器无法连接 API/)
+
+    await expect(callImageApi({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        apiKey: 'test-key',
+        baseUrl: 'https://api.openai.com/v1',
+      },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS },
+      inputImageDataUrls: [],
+    })).rejects.toThrow(/CORS|跨域|API 代理/)
+  })
+
+  it('adds image download guidance when an API returned image URL cannot be fetched', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: [{ url: 'https://cdn.example.com/image.png' }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+
+    await expect(callImageApi({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        apiKey: 'test-key',
+        baseUrl: 'https://api.example.com/v1',
+      },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS },
+      inputImageDataUrls: [],
+    })).rejects.toThrow(/图片 URL 下载失败/)
+  })
 })

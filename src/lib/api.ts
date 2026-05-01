@@ -70,10 +70,25 @@ async function blobToDataUrl(blob: Blob, fallbackMime: string): Promise<string> 
 }
 
 async function fetchImageUrlAsDataUrl(url: string, fallbackMime: string, signal: AbortSignal): Promise<string> {
-  const response = await fetch(url, {
-    cache: 'no-store',
-    signal,
-  })
+  let response: Response
+  try {
+    response = await fetch(url, {
+      cache: 'no-store',
+      signal,
+    })
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new Error('图片 URL 下载超时，请检查接口返回的图片地址是否可访问。')
+    }
+    if (isFetchNetworkError(error)) {
+      throw new Error([
+        `图片 URL 下载失败：浏览器无法连接 ${url}`,
+        '如果接口返回的是远程图片 URL，请确认该地址允许浏览器跨域访问；更稳妥的方式是让接口直接返回 b64_json。',
+        `原始错误：${getErrorMessage(error)}`,
+      ].join('\n'))
+    }
+    throw error
+  }
 
   if (!response.ok) {
     throw new Error(`图片 URL 下载失败：HTTP ${response.status}`)
@@ -103,6 +118,60 @@ function createRequestHeaders(settings: AppSettings): Record<string, string> {
     Authorization: `Bearer ${settings.apiKey}`,
     'Cache-Control': 'no-store, no-cache, max-age=0',
     Pragma: 'no-cache',
+  }
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError'
+}
+
+function isFetchNetworkError(error: unknown): boolean {
+  if (!(error instanceof TypeError)) return false
+  return /failed to fetch|networkerror|load failed|fetch failed/i.test(error.message)
+}
+
+function createFetchFailureMessage(
+  error: unknown,
+  requestUrl: string,
+  useApiProxy: boolean,
+): string {
+  const originalMessage = getErrorMessage(error)
+
+  if (useApiProxy) {
+    return [
+      `浏览器无法连接 API 代理：${requestUrl}`,
+      '请检查当前部署的 API 代理是否正常、ENABLE_API_PROXY 是否为 true，以及 API_PROXY_URL 是否能从服务器访问。',
+      `原始错误：${originalMessage}`,
+    ].join('\n')
+  }
+
+  return [
+    `浏览器无法连接 API：${requestUrl}`,
+    '常见原因是目标接口不允许浏览器跨域（CORS）、HTTPS 页面请求 HTTP 接口被拦截、API URL/域名/证书不可达。',
+    '如果目标接口不支持浏览器直连，请使用本地开发代理或 Docker 同源 API 代理，并在设置中开启“API 代理”。',
+    `原始错误：${originalMessage}`,
+  ].join('\n')
+}
+
+async function fetchWithDiagnostics(
+  requestUrl: string,
+  init: RequestInit,
+  useApiProxy: boolean,
+): Promise<Response> {
+  try {
+    return await fetch(requestUrl, init)
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new Error('请求超时，请检查网络、接口响应时间或调大请求超时设置。')
+    }
+    if (isFetchNetworkError(error)) {
+      throw new Error(createFetchFailureMessage(error, requestUrl, useApiProxy))
+    }
+    throw error
   }
 }
 
@@ -344,13 +413,14 @@ async function callImagesApiSingle(opts: CallApiOptions): Promise<CallApiResult>
         formData.append('mask', maskBlob, 'mask.png')
       }
 
-      response = await fetch(buildApiUrl(settings.baseUrl, 'images/edits', proxyConfig, useApiProxy), {
+      const requestUrl = buildApiUrl(settings.baseUrl, 'images/edits', proxyConfig, useApiProxy)
+      response = await fetchWithDiagnostics(requestUrl, {
         method: 'POST',
         headers: requestHeaders,
         cache: 'no-store',
         body: formData,
         signal: controller.signal,
-      })
+      }, useApiProxy)
     } else {
       const body: Record<string, unknown> = {
         model: settings.model,
@@ -371,7 +441,8 @@ async function callImagesApiSingle(opts: CallApiOptions): Promise<CallApiResult>
         body.n = params.n
       }
 
-      response = await fetch(buildApiUrl(settings.baseUrl, 'images/generations', proxyConfig, useApiProxy), {
+      const requestUrl = buildApiUrl(settings.baseUrl, 'images/generations', proxyConfig, useApiProxy)
+      response = await fetchWithDiagnostics(requestUrl, {
         method: 'POST',
         headers: {
           ...requestHeaders,
@@ -380,7 +451,7 @@ async function callImagesApiSingle(opts: CallApiOptions): Promise<CallApiResult>
         cache: 'no-store',
         body: JSON.stringify(body),
         signal: controller.signal,
-      })
+      }, useApiProxy)
     }
 
     if (!response.ok) {
@@ -487,7 +558,8 @@ async function callResponsesImageApiSingle(opts: CallApiOptions): Promise<CallAp
       tool_choice: 'required',
     }
 
-    const response = await fetch(buildApiUrl(settings.baseUrl, 'responses', proxyConfig, useApiProxy), {
+    const requestUrl = buildApiUrl(settings.baseUrl, 'responses', proxyConfig, useApiProxy)
+    const response = await fetchWithDiagnostics(requestUrl, {
       method: 'POST',
       headers: {
         ...requestHeaders,
@@ -496,7 +568,7 @@ async function callResponsesImageApiSingle(opts: CallApiOptions): Promise<CallAp
       cache: 'no-store',
       body: JSON.stringify(body),
       signal: controller.signal,
-    })
+    }, useApiProxy)
 
     if (!response.ok) {
       throw new Error(await getApiErrorMessage(response))

@@ -11,7 +11,7 @@ const host = process.env.HOST || '0.0.0.0'
 const dataDir = process.env.DATA_DIR || './data'
 const storageToken = process.env.STORAGE_TOKEN || ''
 const accessPassword = process.env.ACCESS_PASSWORD || ''
-const apiUrl = process.env.API_URL || 'https://api.openai.com'
+const apiUrl = (process.env.API_PROXY_URL || process.env.API_URL || 'https://api.openai.com').replace(/\/+$/, '')
 const enableApiProxy = process.env.API_PROXY === 'true' || process.env.ENABLE_API_PROXY === 'true'
 
 const storage = new FileStorage(dataDir)
@@ -107,13 +107,18 @@ if (enableApiProxy) {
     if (c.req.method !== 'POST' && c.req.method !== 'OPTIONS') {
       return c.json({ error: 'Forbidden: Only POST and OPTIONS allowed' }, 403)
     }
-    const targetUrl = `${apiUrl}${path}`
+    const proxyPath = path.replace(/^\/+/, '')
+    const targetPath = apiUrl.endsWith('/v1') && proxyPath.startsWith('v1/')
+      ? proxyPath.slice('v1/'.length)
+      : proxyPath
+    const targetUrl = `${apiUrl}/${targetPath}`
     const headers = new Headers(c.req.raw.headers)
     headers.delete('host')
     headers.set('Access-Control-Allow-Origin', '*')
-    const init: RequestInit = { method: c.req.method, headers }
+    const init: RequestInit & { duplex?: 'half' } = { method: c.req.method, headers }
     if (c.req.method !== 'GET' && c.req.method !== 'HEAD') {
       init.body = c.req.raw.body
+      init.duplex = 'half'
     }
     try {
       const response = await fetch(targetUrl, { ...init, redirect: 'follow' })
@@ -177,6 +182,6 @@ console.log(`Starting server on ${host}:${port}`)
 console.log(`  Data directory: ${dataDir}`)
 console.log(`  Access password: ${accessPassword ? 'enabled' : 'disabled'}`)
 console.log(`  Storage auth: ${storageToken ? 'enabled' : 'disabled'}`)
-console.log(`  API proxy: ${enableApiProxy ? 'enabled' : 'disabled'}`)
+console.log(`  API proxy: ${enableApiProxy ? `enabled (${apiUrl})` : 'disabled'}`)
 
 serve({ fetch: app.fetch, port, hostname: host })
