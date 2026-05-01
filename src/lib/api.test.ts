@@ -200,7 +200,7 @@ describe('callImageApi', () => {
     expect((body as FormData).getAll('image')).toHaveLength(0)
   })
 
-  it('uses the Codex CLI compatible image field for image edits', async () => {
+  it('keeps the OpenAI edit image field independent of Codex CLI mode', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
       const url = String(input)
       if (url.startsWith('data:')) {
@@ -219,6 +219,38 @@ describe('callImageApi', () => {
         ...DEFAULT_SETTINGS,
         apiKey: 'test-key',
         codexCli: true,
+      },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS },
+      inputImageDataUrls: ['data:image/png;base64,aW1hZ2U='],
+    })
+
+    const editCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/images/edits'))
+    const body = editCall?.[1]?.body
+    expect(body).toBeInstanceOf(FormData)
+    expect((body as FormData).getAll('image[]')).toHaveLength(1)
+    expect((body as FormData).getAll('image')).toHaveLength(0)
+  })
+
+  it('uses the compatible edit image field only when explicitly configured', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = String(input)
+      if (url.startsWith('data:')) {
+        return Promise.resolve(new Response(new Blob(['image'], { type: 'image/png' })))
+      }
+      return Promise.resolve(new Response(JSON.stringify({
+        data: [{ b64_json: 'aW1hZ2U=' }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+    })
+
+    await callImageApi({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        apiKey: 'test-key',
+        editImageField: 'image',
       },
       prompt: 'prompt',
       params: { ...DEFAULT_PARAMS },

@@ -29,7 +29,10 @@ export default function SettingsModal() {
 
   useEffect(() => {
     if (showSettings) {
-      setDraft(apiProxyAvailable ? { ...settings, apiProxy: apiProxyForced || settings.apiProxy } : { ...settings, apiProxy: false })
+      const normalizedSettings = { ...DEFAULT_SETTINGS, ...settings }
+      setDraft(apiProxyAvailable
+        ? { ...normalizedSettings, apiProxy: apiProxyForced || normalizedSettings.apiProxy }
+        : { ...normalizedSettings, apiProxy: false })
       setTimeoutInput(String(settings.timeout))
     }
   }, [apiProxyAvailable, apiProxyForced, showSettings, settings])
@@ -43,6 +46,7 @@ export default function SettingsModal() {
       baseUrl: normalizeBaseUrl(nextDraft.baseUrl.trim() || DEFAULT_SETTINGS.baseUrl),
       apiKey: nextDraft.apiKey,
       apiProxy: apiProxyForced || (apiProxyAvailable ? nextDraft.apiProxy : false),
+      editImageField: nextDraft.editImageField === 'image' ? 'image' : DEFAULT_SETTINGS.editImageField,
       model: nextDraft.model.trim() || defaultModel,
       timeout: Number(nextDraft.timeout) || DEFAULT_SETTINGS.timeout,
     }
@@ -185,6 +189,36 @@ export default function SettingsModal() {
                   </div>
                 </div>
               )}
+
+              <div className="block">
+                <div className="mb-1 flex items-center justify-between">
+                  <span className="block text-xs text-gray-500 dark:text-gray-400">编辑图字段</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const editImageField: AppSettings['editImageField'] =
+                        draft.editImageField === 'image' ? 'image[]' : 'image'
+                      const nextDraft = {
+                        ...draft,
+                        editImageField,
+                      }
+                      setDraft(nextDraft)
+                      commitSettings(nextDraft)
+                    }}
+                    className={`relative inline-flex h-3.5 w-6 items-center rounded-full transition-colors ${draft.editImageField === 'image' ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-600'}`}
+                    role="switch"
+                    aria-checked={draft.editImageField === 'image'}
+                    aria-label="编辑图字段 image"
+                  >
+                    <span className={`inline-block h-2.5 w-2.5 transform rounded-full bg-white shadow transition-transform ${draft.editImageField === 'image' ? 'translate-x-[11px]' : 'translate-x-[2px]'}`} />
+                  </button>
+                </div>
+                <div data-selectable-text className="text-[10px] text-gray-400 dark:text-gray-500">
+                  {draft.editImageField === 'image'
+                    ? '兼容只识别 image 字段的编辑接口。'
+                    : '默认使用 OpenAI 的 image[] 字段。'}
+                </div>
+              </div>
 
               <div className="block">
                 <span className="block text-xs text-gray-500 dark:text-gray-400 mb-1">API Key</span>

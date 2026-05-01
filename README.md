@@ -198,6 +198,7 @@ npm run build
 
 - **双接口模式**：支持 `Images API` (需填写 GPT Image 模型，如 `gpt-image-2`) 和 `Responses API` (需填写支持该工具的文本模型，如 `gpt-5.5`)。
 - **API 代理**：开启后，浏览器将请求同源的 `/api-proxy/` 路径，交由当前部署环境（Docker 或 本地开发）代理转发至真实 API，以绕开浏览器 CORS 限制。
+- **编辑图字段兼容**：默认按 OpenAI 格式使用 `image[]` 上传编辑参考图；如果兼容接口报 `image is required for edits`，可在设置中打开“编辑图字段”开关，改用 `image` 字段。
 - **Codex CLI 模式**：如果你在使用源于 Codex CLI 的 API，可以在 `API URL` 右侧开启该模式。开启后会禁用不支持的 `quality` 参数，Images API 的多图生成也将改为并发单图请求。此外，提示词文本开头会加入简短的防改写指令，防止模型偏离原意。（注：Responses API 无论是否开启此模式，都会默认加入防改写指令）。
 - **智能诊断提示**：当应用检测到接口返回的提示词被强制改写，或缺少官方 API 常规返回的参数时，会主动提示你是否针对当前配置组合开启 Codex CLI 模式。
 
@@ -208,6 +209,7 @@ npm run build
 - `?apiUrl=https://你的代理地址.com`
 - `?apiKey=sk-xxxx`
 - `?apiMode=images` 或 `?apiMode=responses`（未传时默认为 `images`）
+- `?editImageField=image`（编辑参考图改用兼容字段；默认是 `image[]`）
 - `?codexCli=true`（强制开启 Codex CLI 模式）
 
 例如，集成到 New API 的聊天系统：

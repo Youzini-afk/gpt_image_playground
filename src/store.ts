@@ -147,6 +147,10 @@ export const useStore = create<AppState>()(
               : st.settings.apiMode ?? DEFAULT_SETTINGS.apiMode,
           codexCli: s.codexCli ?? st.settings.codexCli ?? DEFAULT_SETTINGS.codexCli,
           apiProxy: s.apiProxy ?? st.settings.apiProxy ?? DEFAULT_SETTINGS.apiProxy,
+          editImageField:
+            s.editImageField === 'image' || s.editImageField === 'image[]'
+              ? s.editImageField
+              : st.settings.editImageField ?? DEFAULT_SETTINGS.editImageField,
         },
       })),
       dismissedCodexCliPrompts: [],

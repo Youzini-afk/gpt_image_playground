@@ -6,6 +6,8 @@ export type ApiMode = 'images' | 'responses'
 
 export type StorageMode = 'local' | 'server'
 
+export type EditImageField = 'image[]' | 'image'
+
 export interface AppSettings {
   baseUrl: string
   apiKey: string
@@ -14,6 +16,7 @@ export interface AppSettings {
   apiMode: ApiMode
   codexCli: boolean
   apiProxy: boolean
+  editImageField: EditImageField
   storageMode: StorageMode
 }
 
@@ -29,6 +32,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   apiMode: 'images',
   codexCli: false,
   apiProxy: false,
+  editImageField: 'image[]',
   storageMode: 'local',
 }
 

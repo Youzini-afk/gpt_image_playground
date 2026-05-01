@@ -415,7 +415,7 @@ async function callImagesApiSingle(opts: CallApiOptions): Promise<CallApiResult>
       for (let i = 0; i < imageBlobs.length; i++) {
         const blob = imageBlobs[i]
         const ext = blob.type.split('/')[1] || 'png'
-        formData.append(settings.codexCli ? 'image' : 'image[]', blob, `input-${i + 1}.${ext}`)
+        formData.append(settings.editImageField, blob, `input-${i + 1}.${ext}`)
       }
 
       if (maskBlob) {
