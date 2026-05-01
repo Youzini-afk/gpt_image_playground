@@ -194,8 +194,42 @@ describe('callImageApi', () => {
         }),
       }),
     )
-    expect((fetchMock.mock.calls.find(([url]) => url === '/api-proxy/images/edits')?.[1] as RequestInit).body)
-      .toBeInstanceOf(FormData)
+    const body = (fetchMock.mock.calls.find(([url]) => url === '/api-proxy/images/edits')?.[1] as RequestInit).body
+    expect(body).toBeInstanceOf(FormData)
+    expect((body as FormData).getAll('image[]')).toHaveLength(1)
+    expect((body as FormData).getAll('image')).toHaveLength(0)
+  })
+
+  it('uses the Codex CLI compatible image field for image edits', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = String(input)
+      if (url.startsWith('data:')) {
+        return Promise.resolve(new Response(new Blob(['image'], { type: 'image/png' })))
+      }
+      return Promise.resolve(new Response(JSON.stringify({
+        data: [{ b64_json: 'aW1hZ2U=' }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+    })
+
+    await callImageApi({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        apiKey: 'test-key',
+        codexCli: true,
+      },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS },
+      inputImageDataUrls: ['data:image/png;base64,aW1hZ2U='],
+    })
+
+    const editCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/images/edits'))
+    const body = editCall?.[1]?.body
+    expect(body).toBeInstanceOf(FormData)
+    expect((body as FormData).getAll('image')).toHaveLength(1)
+    expect((body as FormData).getAll('image[]')).toHaveLength(0)
   })
 
   it('ignores stored API proxy settings when the current deployment has no proxy', async () => {
