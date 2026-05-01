@@ -148,7 +148,7 @@ ENABLE_API_PROXY=true
 API_PROXY_URL=https://api.openai.com/v1
 ```
 
-部署完成后，在页面设置中开启 **API 代理**。这样浏览器会请求同源 `/api-proxy/`，由 Zeabur 容器转发到 `API_PROXY_URL`，避免浏览器直连接口时触发 CORS 或 HTTPS/HTTP 混合内容限制。
+部署完成后，Docker/Zeabur 环境会自动强制使用同源 `/api-proxy/`，由 Zeabur 容器转发到 `API_PROXY_URL`，避免浏览器直连接口时触发 CORS 或 HTTPS/HTTP 混合内容限制。页面设置中的 **API 代理** 会显示为已启用状态。
 
 **更新说明：**
 

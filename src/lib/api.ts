@@ -1,6 +1,6 @@
 import type { AppSettings, ImageApiResponse, ResponsesApiResponse, TaskParams } from '../types'
 import { dataUrlToBlob, imageDataUrlToPngBlob, maskDataUrlToPngBlob } from './canvasImage'
-import { buildApiUrl, isApiProxyAvailable, readClientDevProxyConfig } from './devProxy'
+import { buildApiUrl, readClientDevProxyConfig, shouldUseApiProxy } from './devProxy'
 
 const MIME_MAP: Record<string, string> = {
   png: 'image/png',
@@ -357,7 +357,7 @@ async function callImagesApiSingle(opts: CallApiOptions): Promise<CallApiResult>
   const isEdit = inputImageDataUrls.length > 0
   const mime = MIME_MAP[params.output_format] || 'image/png'
   const proxyConfig = readClientDevProxyConfig()
-  const useApiProxy = settings.apiProxy && isApiProxyAvailable(proxyConfig)
+  const useApiProxy = shouldUseApiProxy(settings.apiProxy, proxyConfig)
   const requestHeaders = createRequestHeaders(settings)
 
   const controller = new AbortController()
@@ -536,7 +536,7 @@ async function callResponsesImageApiSingle(opts: CallApiOptions): Promise<CallAp
   const { settings, prompt, params, inputImageDataUrls } = opts
   const mime = MIME_MAP[params.output_format] || 'image/png'
   const proxyConfig = readClientDevProxyConfig()
-  const useApiProxy = settings.apiProxy && isApiProxyAvailable(proxyConfig)
+  const useApiProxy = shouldUseApiProxy(settings.apiProxy, proxyConfig)
   const requestHeaders = createRequestHeaders(settings)
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), settings.timeout * 1000)

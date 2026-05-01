@@ -124,6 +124,70 @@ describe('callImageApi', () => {
     )
   })
 
+  it('forces the same-origin API proxy on Docker deployments when the proxy is available', async () => {
+    vi.stubEnv('VITE_DOCKER_DEPLOYMENT', 'true')
+    vi.stubEnv('VITE_API_PROXY_AVAILABLE', 'true')
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      data: [{ b64_json: 'aW1hZ2U=' }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+
+    await callImageApi({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        apiKey: 'test-key',
+        apiProxy: false,
+        baseUrl: 'https://youzicoex.zeabur.app/v1',
+      },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS },
+      inputImageDataUrls: [],
+    })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api-proxy/images/generations',
+      expect.objectContaining({ method: 'POST' }),
+    )
+  })
+
+  it('forces the same-origin API proxy for image edits on Docker deployments', async () => {
+    vi.stubEnv('VITE_DOCKER_DEPLOYMENT', 'true')
+    vi.stubEnv('VITE_API_PROXY_AVAILABLE', 'true')
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const url = String(input)
+      if (url.startsWith('data:')) {
+        return Promise.resolve(new Response(new Blob(['image'], { type: 'image/png' })))
+      }
+      return Promise.resolve(new Response(JSON.stringify({
+        data: [{ b64_json: 'aW1hZ2U=' }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+    })
+
+    await callImageApi({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        apiKey: 'test-key',
+        apiProxy: false,
+        baseUrl: 'https://youzicoex.zeabur.app/v1',
+      },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS },
+      inputImageDataUrls: ['data:image/png;base64,aW1hZ2U='],
+    })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api-proxy/images/edits',
+      expect.objectContaining({ method: 'POST' }),
+    )
+    expect((fetchMock.mock.calls.find(([url]) => url === '/api-proxy/images/edits')?.[1] as RequestInit).body)
+      .toBeInstanceOf(FormData)
+  })
+
   it('ignores stored API proxy settings when the current deployment has no proxy', async () => {
     vi.stubEnv('VITE_API_PROXY_AVAILABLE', 'false')
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({

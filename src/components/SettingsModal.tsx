@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { normalizeBaseUrl } from '../lib/api'
-import { isApiProxyAvailable, readClientDevProxyConfig } from '../lib/devProxy'
+import { isApiProxyAvailable, isApiProxyForced, readClientDevProxyConfig } from '../lib/devProxy'
 import { testServerStorage } from '../lib/storage'
 import { useStore, exportData, importData, clearAllData, switchStorageMode } from '../store'
 import { DEFAULT_IMAGES_MODEL, DEFAULT_RESPONSES_MODEL, DEFAULT_SETTINGS, type AppSettings } from '../types'
@@ -19,18 +19,20 @@ export default function SettingsModal() {
   const [showApiKey, setShowApiKey] = useState(false)
   const [testingConnection, setTestingConnection] = useState(false)
   const [connectionResult, setConnectionResult] = useState<{ ok: boolean; error?: string } | null>(null)
-  const apiProxyAvailable = isApiProxyAvailable(readClientDevProxyConfig())
-  const apiProxyEnabled = apiProxyAvailable && draft.apiProxy
+  const clientProxyConfig = readClientDevProxyConfig()
+  const apiProxyAvailable = isApiProxyAvailable(clientProxyConfig)
+  const apiProxyForced = isApiProxyForced(clientProxyConfig)
+  const apiProxyEnabled = apiProxyForced || (apiProxyAvailable && draft.apiProxy)
 
   const getDefaultModelForMode = (apiMode: AppSettings['apiMode']) =>
     apiMode === 'responses' ? DEFAULT_RESPONSES_MODEL : DEFAULT_IMAGES_MODEL
 
   useEffect(() => {
     if (showSettings) {
-      setDraft(apiProxyAvailable ? settings : { ...settings, apiProxy: false })
+      setDraft(apiProxyAvailable ? { ...settings, apiProxy: apiProxyForced || settings.apiProxy } : { ...settings, apiProxy: false })
       setTimeoutInput(String(settings.timeout))
     }
-  }, [apiProxyAvailable, showSettings, settings])
+  }, [apiProxyAvailable, apiProxyForced, showSettings, settings])
 
   const commitSettings = (nextDraft: AppSettings) => {
     const apiMode = nextDraft.apiMode === 'responses' ? 'responses' : DEFAULT_SETTINGS.apiMode
@@ -40,7 +42,7 @@ export default function SettingsModal() {
       apiMode,
       baseUrl: normalizeBaseUrl(nextDraft.baseUrl.trim() || DEFAULT_SETTINGS.baseUrl),
       apiKey: nextDraft.apiKey,
-      apiProxy: apiProxyAvailable ? nextDraft.apiProxy : false,
+      apiProxy: apiProxyForced || (apiProxyAvailable ? nextDraft.apiProxy : false),
       model: nextDraft.model.trim() || defaultModel,
       timeout: Number(nextDraft.timeout) || DEFAULT_SETTINGS.timeout,
     }
@@ -163,20 +165,24 @@ export default function SettingsModal() {
                     <button
                       type="button"
                       onClick={() => {
+                        if (apiProxyForced) return
                         const nextDraft = { ...draft, apiProxy: !draft.apiProxy }
                         setDraft(nextDraft)
                         commitSettings(nextDraft)
                       }}
-                      className={`relative inline-flex h-3.5 w-6 items-center rounded-full transition-colors ${draft.apiProxy ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-600'}`}
+                      className={`relative inline-flex h-3.5 w-6 items-center rounded-full transition-colors ${apiProxyEnabled ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-600'} ${apiProxyForced ? 'cursor-not-allowed opacity-70' : ''}`}
                       role="switch"
-                      aria-checked={draft.apiProxy}
+                      aria-checked={apiProxyEnabled}
+                      disabled={apiProxyForced}
                       aria-label="API 代理"
                     >
-                      <span className={`inline-block h-2.5 w-2.5 transform rounded-full bg-white shadow transition-transform ${draft.apiProxy ? 'translate-x-[11px]' : 'translate-x-[2px]'}`} />
+                      <span className={`inline-block h-2.5 w-2.5 transform rounded-full bg-white shadow transition-transform ${apiProxyEnabled ? 'translate-x-[11px]' : 'translate-x-[2px]'}`} />
                     </button>
                   </div>
                   <div data-selectable-text className="text-[10px] text-gray-400 dark:text-gray-500">
-                    由当前部署提供同源代理，用于解决浏览器跨域限制；开启后 API URL 设置会被忽略。
+                    {apiProxyForced
+                      ? '当前 Docker/Zeabur 部署已强制使用同源代理，浏览器不会直连外部 API。'
+                      : '由当前部署提供同源代理，用于解决浏览器跨域限制；开启后 API URL 设置会被忽略。'}
                   </div>
                 </div>
               )}

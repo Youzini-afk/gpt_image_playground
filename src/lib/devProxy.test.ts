@@ -1,5 +1,9 @@
-import { describe, expect, it } from 'vitest'
-import { buildApiUrl } from './devProxy'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { buildApiUrl, isApiProxyForced, shouldUseApiProxy } from './devProxy'
+
+afterEach(() => {
+  vi.unstubAllEnvs()
+})
 
 describe('buildApiUrl', () => {
   it('uses the same-origin proxy prefix when API proxy is enabled', () => {
@@ -35,5 +39,32 @@ describe('buildApiUrl', () => {
     expect(buildApiUrl('http://api.example.com/v1', 'responses', null, false)).toBe(
       'http://api.example.com/v1/responses',
     )
+  })
+})
+
+describe('API proxy selection', () => {
+  it('forces the API proxy for Docker deployments when the proxy is available', () => {
+    vi.stubEnv('VITE_DOCKER_DEPLOYMENT', 'true')
+    vi.stubEnv('VITE_API_PROXY_AVAILABLE', 'true')
+
+    expect(isApiProxyForced()).toBe(true)
+    expect(shouldUseApiProxy(false)).toBe(true)
+  })
+
+  it('does not force the API proxy when the current deployment has no proxy', () => {
+    vi.stubEnv('VITE_DOCKER_DEPLOYMENT', 'true')
+    vi.stubEnv('VITE_API_PROXY_AVAILABLE', 'false')
+
+    expect(isApiProxyForced()).toBe(false)
+    expect(shouldUseApiProxy(true)).toBe(false)
+  })
+
+  it('keeps the user setting authoritative outside Docker deployments', () => {
+    vi.stubEnv('VITE_DOCKER_DEPLOYMENT', 'false')
+    vi.stubEnv('VITE_API_PROXY_AVAILABLE', 'true')
+
+    expect(isApiProxyForced()).toBe(false)
+    expect(shouldUseApiProxy(false)).toBe(false)
+    expect(shouldUseApiProxy(true)).toBe(true)
   })
 })
