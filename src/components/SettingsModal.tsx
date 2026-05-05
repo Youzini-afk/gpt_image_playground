@@ -3,9 +3,29 @@ import { normalizeBaseUrl } from '../lib/api'
 import { isApiProxyAvailable, isApiProxyForced, readClientDevProxyConfig } from '../lib/devProxy'
 import { testServerStorage } from '../lib/storage'
 import { useStore, exportData, importData, clearAllData, switchStorageMode } from '../store'
-import { DEFAULT_IMAGES_MODEL, DEFAULT_RESPONSES_MODEL, DEFAULT_SETTINGS, type AppSettings } from '../types'
+import {
+  createDefaultOpenAIProfile,
+  DEFAULT_FAL_BASE_URL,
+  DEFAULT_FAL_MODEL,
+  DEFAULT_IMAGES_MODEL,
+  DEFAULT_OPENAI_PROFILE_ID,
+  DEFAULT_RESPONSES_MODEL,
+  DEFAULT_SETTINGS,
+  getActiveApiProfile,
+  normalizeSettings,
+  switchApiProfileProvider,
+} from '../lib/apiProfiles'
+import type { ApiProfile, AppSettings } from '../types'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 import Select from './Select'
+
+function newId(prefix: string) {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+}
+
+function providerLabel(provider: string) {
+  return provider === 'fal' ? 'fal.ai' : 'OpenAI'
+}
 
 export default function SettingsModal() {
   const showSettings = useStore((s) => s.showSettings)
@@ -14,74 +34,174 @@ export default function SettingsModal() {
   const setSettings = useStore((s) => s.setSettings)
   const setConfirmDialog = useStore((s) => s.setConfirmDialog)
   const importInputRef = useRef<HTMLInputElement>(null)
-  const [draft, setDraft] = useState<AppSettings>(settings)
-  const [timeoutInput, setTimeoutInput] = useState(String(settings.timeout))
+
+  const [draft, setDraft] = useState<AppSettings>(normalizeSettings(settings))
+  const [timeoutInput, setTimeoutInput] = useState(String(getActiveApiProfile(settings).timeout))
   const [showApiKey, setShowApiKey] = useState(false)
+  const [showProfileMenu, setShowProfileMenu] = useState(false)
   const [testingConnection, setTestingConnection] = useState(false)
   const [connectionResult, setConnectionResult] = useState<{ ok: boolean; error?: string } | null>(null)
+
   const clientProxyConfig = readClientDevProxyConfig()
   const apiProxyAvailable = isApiProxyAvailable(clientProxyConfig)
   const apiProxyForced = isApiProxyForced(clientProxyConfig)
-  const apiProxyEnabled = apiProxyForced || (apiProxyAvailable && draft.apiProxy)
+  const activeProfile = draft.profiles.find((profile) => profile.id === draft.activeProfileId) ?? draft.profiles[0] ?? getActiveApiProfile(draft)
+  const apiProxyEnabled = activeProfile.provider === 'openai' && (apiProxyForced || (apiProxyAvailable && activeProfile.apiProxy))
 
   const getDefaultModelForMode = (apiMode: AppSettings['apiMode']) =>
     apiMode === 'responses' ? DEFAULT_RESPONSES_MODEL : DEFAULT_IMAGES_MODEL
 
+  const wasSettingsOpenRef = useRef(false)
+
   useEffect(() => {
-    if (showSettings) {
-      const normalizedSettings = { ...DEFAULT_SETTINGS, ...settings }
-      setDraft(apiProxyAvailable
-        ? { ...normalizedSettings, apiProxy: apiProxyForced || normalizedSettings.apiProxy }
-        : { ...normalizedSettings, apiProxy: false })
-      setTimeoutInput(String(settings.timeout))
+    if (!showSettings) {
+      wasSettingsOpenRef.current = false
+      return
     }
+    if (wasSettingsOpenRef.current) return
+
+    wasSettingsOpenRef.current = true
+    const nextDraft = normalizeSettings({
+      ...settings,
+      profiles: settings.profiles.map((profile) => ({
+        ...profile,
+        apiProxy: profile.provider === 'openai' && (apiProxyForced || (apiProxyAvailable && profile.apiProxy)),
+      })),
+    })
+    setDraft(nextDraft)
+    setTimeoutInput(String(getActiveApiProfile(nextDraft).timeout))
   }, [apiProxyAvailable, apiProxyForced, showSettings, settings])
 
+  useEffect(() => {
+    setTimeoutInput(String(activeProfile.timeout))
+  }, [activeProfile.id, activeProfile.timeout])
+
   const commitSettings = (nextDraft: AppSettings) => {
-    const apiMode = nextDraft.apiMode === 'responses' ? 'responses' : DEFAULT_SETTINGS.apiMode
-    const defaultModel = getDefaultModelForMode(apiMode)
-    const normalizedDraft = {
+    const normalizedProfiles = nextDraft.profiles.map((profile) => {
+      const normalizedBaseUrl = profile.provider === 'fal'
+        ? profile.baseUrl.trim().replace(/\/+$/, '') || DEFAULT_FAL_BASE_URL
+        : normalizeBaseUrl(profile.baseUrl.trim() || DEFAULT_SETTINGS.baseUrl)
+      const defaultModel = profile.provider === 'fal' ? DEFAULT_FAL_MODEL : getDefaultModelForMode(profile.apiMode)
+      return {
+        ...profile,
+        name: profile.name.trim() || (profile.id === DEFAULT_OPENAI_PROFILE_ID ? '默认' : '新配置'),
+        baseUrl: normalizedBaseUrl,
+        model: profile.model.trim() || defaultModel,
+        timeout: Number(profile.timeout) || DEFAULT_SETTINGS.timeout,
+        apiProxy: profile.provider === 'openai' && (apiProxyForced || (apiProxyAvailable && profile.apiProxy)),
+        codexCli: profile.provider === 'openai' ? profile.codexCli : false,
+        editImageField: profile.provider === 'openai' && profile.editImageField === 'image'
+          ? 'image'
+          : DEFAULT_SETTINGS.editImageField,
+      }
+    })
+    const fallbackProfile = createDefaultOpenAIProfile({ id: newId('openai') })
+    const normalizedDraft = normalizeSettings({
       ...nextDraft,
-      apiMode,
-      baseUrl: normalizeBaseUrl(nextDraft.baseUrl.trim() || DEFAULT_SETTINGS.baseUrl),
-      apiKey: nextDraft.apiKey,
-      apiProxy: apiProxyForced || (apiProxyAvailable ? nextDraft.apiProxy : false),
-      editImageField: nextDraft.editImageField === 'image' ? 'image' : DEFAULT_SETTINGS.editImageField,
-      model: nextDraft.model.trim() || defaultModel,
-      timeout: Number(nextDraft.timeout) || DEFAULT_SETTINGS.timeout,
-    }
+      profiles: normalizedProfiles.length ? normalizedProfiles : [fallbackProfile],
+      activeProfileId: normalizedProfiles.some((profile) => profile.id === nextDraft.activeProfileId)
+        ? nextDraft.activeProfileId
+        : (normalizedProfiles[0]?.id ?? fallbackProfile.id),
+    })
     setDraft(normalizedDraft)
     setSettings(normalizedDraft)
   }
 
+  const getDraftWithActiveProfilePatch = (patch: Partial<ApiProfile>) => ({
+      ...draft,
+      profiles: draft.profiles.map((profile) => profile.id === activeProfile.id ? { ...profile, ...patch } : profile),
+    })
+
+  const updateActiveProfile = (patch: Partial<ApiProfile>, commit = false) => {
+    const nextDraft = getDraftWithActiveProfilePatch(patch)
+    setDraft(nextDraft)
+    if (commit) commitSettings(nextDraft)
+  }
+
+  const commitActiveProfilePatch = (patch: Partial<ApiProfile>) => {
+    const nextDraft = getDraftWithActiveProfilePatch(patch)
+    commitSettings(nextDraft)
+  }
+
   const handleClose = () => {
     const nextTimeout = Number(timeoutInput)
-    commitSettings({
+    const normalizedTimeout =
+      timeoutInput.trim() === '' || Number.isNaN(nextTimeout)
+        ? DEFAULT_SETTINGS.timeout
+        : nextTimeout
+    const nextDraft = {
       ...draft,
-      timeout:
-        timeoutInput.trim() === '' || Number.isNaN(nextTimeout)
-          ? DEFAULT_SETTINGS.timeout
-          : nextTimeout,
-    })
+      profiles: activeProfile.provider === 'openai'
+        ? draft.profiles.map((profile) =>
+            profile.id === activeProfile.id ? { ...profile, timeout: normalizedTimeout } : profile,
+          )
+        : draft.profiles,
+    }
+    commitSettings(nextDraft)
     setShowSettings(false)
   }
 
   const commitTimeout = useCallback(() => {
+    if (activeProfile.provider !== 'openai') return
     const nextTimeout = Number(timeoutInput)
     const normalizedTimeout =
-      timeoutInput.trim() === '' ? DEFAULT_SETTINGS.timeout : Number.isNaN(nextTimeout) ? draft.timeout : nextTimeout
+      timeoutInput.trim() === '' ? DEFAULT_SETTINGS.timeout : Number.isNaN(nextTimeout) ? activeProfile.timeout : nextTimeout
     setTimeoutInput(String(normalizedTimeout))
-    commitSettings({ ...draft, timeout: normalizedTimeout })
-  }, [draft, timeoutInput])
+    updateActiveProfile({ timeout: normalizedTimeout }, true)
+  }, [draft, activeProfile.id, activeProfile.provider, activeProfile.timeout, timeoutInput])
 
   useCloseOnEscape(showSettings, handleClose)
 
   if (!showSettings) return null
 
-  const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
-    if (file) importData(file)
+    if (file) {
+      const imported = await importData(file)
+      if (imported) {
+        const nextDraft = normalizeSettings(useStore.getState().settings)
+        setDraft(nextDraft)
+        setTimeoutInput(String(getActiveApiProfile(nextDraft).timeout))
+        setShowProfileMenu(false)
+      }
+    }
     e.target.value = ''
+  }
+
+  const handleClearAllData = async () => {
+    await clearAllData()
+    const nextDraft = normalizeSettings(useStore.getState().settings)
+    setDraft(nextDraft)
+    setTimeoutInput(String(getActiveApiProfile(nextDraft).timeout))
+    setShowProfileMenu(false)
+  }
+
+  const createNewProfile = () => {
+    const profile = createDefaultOpenAIProfile({ id: newId('openai'), name: '新配置' })
+    const nextDraft = normalizeSettings({
+        ...draft,
+        profiles: [...draft.profiles, profile],
+        activeProfileId: profile.id
+    })
+    commitSettings(nextDraft)
+    setShowProfileMenu(false)
+  }
+
+  const switchProfile = (id: string) => {
+    const nextDraft = normalizeSettings({ ...draft, activeProfileId: id })
+    setDraft(nextDraft)
+    setShowProfileMenu(false)
+  }
+
+  const deleteProfile = (id: string) => {
+    if (draft.profiles.length <= 1) return
+    const nextProfiles = draft.profiles.filter((item) => item.id !== id)
+    const nextDraft = normalizeSettings({
+      ...draft,
+      profiles: nextProfiles,
+      activeProfileId: draft.activeProfileId === id ? nextProfiles[0].id : draft.activeProfileId,
+    })
+    commitSettings(nextDraft)
   }
 
   return (
@@ -117,51 +237,186 @@ export default function SettingsModal() {
 
         <div className="space-y-6">
           <section>
-            <h4 className="mb-4 text-sm font-medium text-gray-800 dark:text-gray-200 flex items-center gap-1.5">
-              <svg className="w-4 h-4 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
-              </svg>
-              API 配置
-            </h4>
+            <div className="mb-4 flex items-center justify-between gap-3 relative">
+              <h4 className="text-sm font-medium text-gray-800 dark:text-gray-200 flex items-center gap-1.5">
+                <svg className="w-4 h-4 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6l4 2m6-2a10 10 0 11-20 0 10 10 0 0120 0z" />
+                </svg>
+                习惯配置
+              </h4>
+            </div>
+            <div className="space-y-4">
+              <div className="block">
+                <div className="mb-1 flex items-center justify-between">
+                  <span className="block text-xs text-gray-500 dark:text-gray-400">提交任务后清空输入框</span>
+                  <button
+                    type="button"
+                    onClick={() => commitSettings({ ...draft, clearInputAfterSubmit: !draft.clearInputAfterSubmit })}
+                    className={`relative inline-flex h-3.5 w-6 items-center rounded-full transition-colors ${draft.clearInputAfterSubmit ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-600'}`}
+                    role="switch"
+                    aria-checked={draft.clearInputAfterSubmit}
+                    aria-label="提交任务后清空输入框"
+                  >
+                    <span className={`inline-block h-2.5 w-2.5 transform rounded-full bg-white shadow transition-transform ${draft.clearInputAfterSubmit ? 'translate-x-[11px]' : 'translate-x-[2px]'}`} />
+                  </button>
+                </div>
+                <div data-selectable-text className="text-[10px] text-gray-400 dark:text-gray-500">
+                  开启后，提交成功创建任务时会清空提示词和参考图。
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section>
+            <div className="mb-4 flex items-center justify-between gap-3 relative">
+              <h4 className="text-sm font-medium text-gray-800 dark:text-gray-200 flex items-center gap-1.5">
+                <svg className="w-4 h-4 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+                </svg>
+                API 配置
+              </h4>
+
+              <div className="relative w-44 sm:w-48">
+                <button
+                  type="button"
+                  onClick={() => setShowProfileMenu(!showProfileMenu)}
+                  className="flex w-full min-w-0 items-center justify-between gap-2 rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2 text-sm text-gray-700 outline-none transition hover:bg-gray-50 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:hover:bg-white/[0.06]"
+                  title={activeProfile.name}
+                >
+                  <span className="flex min-w-0 items-center gap-2">
+                    <span className="min-w-0 truncate">{activeProfile.name}</span>
+                    <span className="shrink-0 rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:bg-blue-500/10 dark:text-blue-400">
+                      {providerLabel(activeProfile.provider)}
+                    </span>
+                  </span>
+                  <svg className={`w-3.5 h-3.5 flex-shrink-0 text-gray-400 dark:text-gray-500 transition-transform duration-200 ${showProfileMenu ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+
+                {showProfileMenu && (
+                  <>
+                    <div className="fixed inset-0 z-40" onClick={() => setShowProfileMenu(false)} />
+                    <div className="absolute right-0 top-full z-50 mt-1.5 max-h-60 w-full overflow-hidden overflow-y-auto rounded-xl border border-gray-200/60 bg-white/95 py-1 shadow-[0_8px_30px_rgb(0,0,0,0.12)] ring-1 ring-black/5 backdrop-blur-xl animate-dropdown-down dark:border-white/[0.08] dark:bg-gray-900/95 dark:shadow-[0_8px_30px_rgb(0,0,0,0.3)] dark:ring-white/10 custom-scrollbar">
+                      <button
+                        type="button"
+                        onClick={createNewProfile}
+                        className="flex w-full cursor-pointer items-center justify-between gap-2 px-3 py-2 text-left text-xs font-medium text-blue-600 transition-colors hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-500/10"
+                      >
+                        <span className="truncate">创建新配置</span>
+                        <span className="flex h-5 w-5 shrink-0 items-center justify-center">
+                          <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                          </svg>
+                        </span>
+                      </button>
+                      <div>
+                        {draft.profiles.map(profile => (
+                          <div
+                            key={profile.id}
+                            title={profile.name}
+                            className={`group flex w-full cursor-pointer items-center justify-between px-3 py-2 text-left text-xs transition-colors ${profile.id === activeProfile.id ? 'bg-blue-50 font-medium text-blue-600 dark:bg-blue-500/10 dark:text-blue-400' : 'text-gray-700 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-white/[0.06]'}`}
+                          >
+                            <button
+                              type="button"
+                              onClick={() => switchProfile(profile.id)}
+                              className="flex min-w-0 flex-1 items-center gap-2 pr-2"
+                            >
+                              <span className="min-w-0 truncate">{profile.name}</span>
+                              <span className={`rounded px-1.5 py-0.5 text-[10px] shrink-0 ${profile.id === activeProfile.id ? 'bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-300' : 'bg-gray-100 text-gray-500 dark:bg-white/[0.08] dark:text-gray-400'}`}>
+                                {providerLabel(profile.provider)}
+                              </span>
+                            </button>
+
+                            {draft.profiles.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  setConfirmDialog({
+                                    title: '删除配置',
+                                    message: `确定要删除配置「${profile.name}」吗？`,
+                                    action: () => deleteProfile(profile.id)
+                                  })
+                                }}
+                                className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-gray-400 opacity-60 transition-all hover:bg-red-50 hover:text-red-500 hover:opacity-100 dark:hover:bg-red-500/10"
+                                aria-label="删除配置"
+                              >
+                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                </svg>
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+
             <div className="space-y-4">
               <label className="block">
-                <div className="mb-1 flex items-center justify-between">
-                  <span className="block text-xs text-gray-500 dark:text-gray-400">API URL</span>
-                  <div
-                    onClick={(e) => {
-                      e.preventDefault()
-                      const nextDraft = { ...draft, codexCli: !draft.codexCli }
-                      setDraft(nextDraft)
-                      commitSettings(nextDraft)
-                    }}
-                    className="flex cursor-pointer items-center gap-1.5"
-                    role="switch"
-                    aria-checked={draft.codexCli}
-                  >
-                    <span className={`text-[10px] transition-colors ${draft.codexCli ? 'text-blue-500 dark:text-blue-400' : 'text-gray-400 dark:text-gray-500'}`}>Codex CLI</span>
-                    <span className={`relative inline-flex h-3.5 w-6 items-center rounded-full transition-colors ${draft.codexCli ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-600'}`}>
-                      <span className={`inline-block h-2.5 w-2.5 transform rounded-full bg-white shadow transition-transform ${draft.codexCli ? 'translate-x-[11px]' : 'translate-x-[2px]'}`} />
-                    </span>
-                  </div>
-                </div>
+                <span className="mb-1 block text-xs text-gray-500 dark:text-gray-400">配置名称</span>
                 <input
-                  value={draft.baseUrl}
-                  onChange={(e) => setDraft((prev) => ({ ...prev, baseUrl: e.target.value }))}
-                  onBlur={(e) => commitSettings({ ...draft, baseUrl: e.target.value })}
+                  value={activeProfile.name}
+                  onChange={(e) => updateActiveProfile({ name: e.target.value })}
+                  onBlur={(e) => commitActiveProfilePatch({ name: e.target.value })}
                   type="text"
-                  placeholder={DEFAULT_SETTINGS.baseUrl}
                   className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
                 />
-                <div data-selectable-text className="mt-1 min-h-[22px] flex items-center text-[10px] text-gray-400 dark:text-gray-500">
-                  {apiProxyEnabled ? (
-                    <span className="text-yellow-600 dark:text-yellow-500">已开启代理，浏览器请求同源后端，后端会转发到此处填写的 API URL。</span>
-                  ) : (
-                    <span>支持通过查询参数覆盖：<code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">?apiUrl=</code>，<code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">codexCli=true</code></span>
-                  )}
-                </div>
               </label>
 
-              {apiProxyAvailable && (
+              <label className="block">
+                <span className="mb-1 block text-xs text-gray-500 dark:text-gray-400">服务商类型</span>
+                <Select
+                  value={activeProfile.provider}
+                  onChange={(value) => updateActiveProfile(switchApiProfileProvider(activeProfile, value as ApiProfile['provider']), true)}
+                  options={[{ label: 'OpenAI 兼容接口', value: 'openai' }, { label: 'fal.ai', value: 'fal' }]}
+                  className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
+                />
+              </label>
+
+              {activeProfile.provider === 'openai' && (
+                <label className="block">
+                  <div className="mb-1 flex items-center justify-between">
+                    <span className="block text-xs text-gray-500 dark:text-gray-400">API URL</span>
+                    <div
+                      onClick={(e) => {
+                        e.preventDefault()
+                        updateActiveProfile({ codexCli: !activeProfile.codexCli }, true)
+                      }}
+                      className="flex cursor-pointer items-center gap-1.5"
+                      role="switch"
+                      aria-checked={activeProfile.codexCli}
+                    >
+                      <span className={`text-[10px] transition-colors ${activeProfile.codexCli ? 'text-blue-500 dark:text-blue-400' : 'text-gray-400 dark:text-gray-500'}`}>Codex CLI</span>
+                      <span className={`relative inline-flex h-3.5 w-6 items-center rounded-full transition-colors ${activeProfile.codexCli ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-600'}`}>
+                        <span className={`inline-block h-2.5 w-2.5 transform rounded-full bg-white shadow transition-transform ${activeProfile.codexCli ? 'translate-x-[11px]' : 'translate-x-[2px]'}`} />
+                      </span>
+                    </div>
+                  </div>
+                  <input
+                    value={activeProfile.baseUrl}
+                    onChange={(e) => updateActiveProfile({ baseUrl: e.target.value })}
+                    onBlur={(e) => commitActiveProfilePatch({ baseUrl: e.target.value })}
+                    type="text"
+                    disabled={apiProxyEnabled}
+                    placeholder={DEFAULT_SETTINGS.baseUrl}
+                    className={`w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50 ${apiProxyEnabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  />
+                  <div data-selectable-text className="mt-1 min-h-[22px] flex items-center text-[10px] text-gray-400 dark:text-gray-500">
+                    {apiProxyEnabled ? (
+                      <span className="text-yellow-600 dark:text-yellow-500">已开启代理，实际请求目标由部署端决定，此处设置被忽略。</span>
+                    ) : (
+                      <span>支持通过查询参数覆盖：<code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">?apiUrl=</code>，<code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">codexCli=true</code></span>
+                    )}
+                  </div>
+                </label>
+              )}
+
+              {apiProxyAvailable && activeProfile.provider === 'openai' && (
                 <div className="block">
                   <div className="mb-1 flex items-center justify-between">
                     <span className="block text-xs text-gray-500 dark:text-gray-400">API 代理</span>
@@ -169,9 +424,7 @@ export default function SettingsModal() {
                       type="button"
                       onClick={() => {
                         if (apiProxyForced) return
-                        const nextDraft = { ...draft, apiProxy: !draft.apiProxy }
-                        setDraft(nextDraft)
-                        commitSettings(nextDraft)
+                        updateActiveProfile({ apiProxy: !activeProfile.apiProxy }, true)
                       }}
                       className={`relative inline-flex h-3.5 w-6 items-center rounded-full transition-colors ${apiProxyEnabled ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-600'} ${apiProxyForced ? 'cursor-not-allowed opacity-70' : ''}`}
                       role="switch"
@@ -190,45 +443,42 @@ export default function SettingsModal() {
                 </div>
               )}
 
-              <div className="block">
-                <div className="mb-1 flex items-center justify-between">
-                  <span className="block text-xs text-gray-500 dark:text-gray-400">编辑图字段</span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const editImageField: AppSettings['editImageField'] =
-                        draft.editImageField === 'image' ? 'image[]' : 'image'
-                      const nextDraft = {
-                        ...draft,
-                        editImageField,
-                      }
-                      setDraft(nextDraft)
-                      commitSettings(nextDraft)
-                    }}
-                    className={`relative inline-flex h-3.5 w-6 items-center rounded-full transition-colors ${draft.editImageField === 'image' ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-600'}`}
-                    role="switch"
-                    aria-checked={draft.editImageField === 'image'}
-                    aria-label="编辑图字段 image"
-                  >
-                    <span className={`inline-block h-2.5 w-2.5 transform rounded-full bg-white shadow transition-transform ${draft.editImageField === 'image' ? 'translate-x-[11px]' : 'translate-x-[2px]'}`} />
-                  </button>
+              {activeProfile.provider === 'openai' && (
+                <div className="block">
+                  <div className="mb-1 flex items-center justify-between">
+                    <span className="block text-xs text-gray-500 dark:text-gray-400">编辑图字段</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const editImageField: AppSettings['editImageField'] =
+                          activeProfile.editImageField === 'image' ? 'image[]' : 'image'
+                        updateActiveProfile({ editImageField }, true)
+                      }}
+                      className={`relative inline-flex h-3.5 w-6 items-center rounded-full transition-colors ${activeProfile.editImageField === 'image' ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-600'}`}
+                      role="switch"
+                      aria-checked={activeProfile.editImageField === 'image'}
+                      aria-label="编辑图字段 image"
+                    >
+                      <span className={`inline-block h-2.5 w-2.5 transform rounded-full bg-white shadow transition-transform ${activeProfile.editImageField === 'image' ? 'translate-x-[11px]' : 'translate-x-[2px]'}`} />
+                    </button>
+                  </div>
+                  <div data-selectable-text className="text-[10px] text-gray-400 dark:text-gray-500">
+                    {activeProfile.editImageField === 'image'
+                      ? '兼容只识别 image 字段的编辑接口。'
+                      : '默认使用 OpenAI 的 image[] 字段。'}
+                  </div>
                 </div>
-                <div data-selectable-text className="text-[10px] text-gray-400 dark:text-gray-500">
-                  {draft.editImageField === 'image'
-                    ? '兼容只识别 image 字段的编辑接口。'
-                    : '默认使用 OpenAI 的 image[] 字段。'}
-                </div>
-              </div>
+              )}
 
               <div className="block">
                 <span className="block text-xs text-gray-500 dark:text-gray-400 mb-1">API Key</span>
                 <div className="relative">
                   <input
-                    value={draft.apiKey}
-                    onChange={(e) => setDraft((prev) => ({ ...prev, apiKey: e.target.value }))}
-                    onBlur={(e) => commitSettings({ ...draft, apiKey: e.target.value })}
+                    value={activeProfile.apiKey}
+                    onChange={(e) => updateActiveProfile({ apiKey: e.target.value })}
+                    onBlur={(e) => commitActiveProfilePatch({ apiKey: e.target.value })}
                     type={showApiKey ? 'text' : 'password'}
-                    placeholder="sk-..."
+                    placeholder={activeProfile.provider === 'fal' ? 'FAL_KEY' : 'sk-...'}
                     className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2 pr-10 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
                   />
                   <button
@@ -257,45 +507,47 @@ export default function SettingsModal() {
                 </div>
               </div>
 
-              <label className="block">
-                <span className="block text-xs text-gray-500 dark:text-gray-400 mb-1">API 接口</span>
-                <Select
-                  value={draft.apiMode ?? DEFAULT_SETTINGS.apiMode}
-                  onChange={(value) => {
-                    const apiMode = value as AppSettings['apiMode']
-                    const nextModel =
-                      draft.model === DEFAULT_IMAGES_MODEL || draft.model === DEFAULT_RESPONSES_MODEL
-                        ? getDefaultModelForMode(apiMode)
-                        : draft.model
-                    const nextDraft = { ...draft, apiMode, model: nextModel }
-                    setDraft(nextDraft)
-                    commitSettings(nextDraft)
-                  }}
-                  options={[
-                    { label: 'Images API (/v1/images)', value: 'images' },
-                    { label: 'Responses API (/v1/responses)', value: 'responses' },
-                  ]}
-                  className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
-                />
-                <div data-selectable-text className="mt-1 text-[10px] text-gray-400 dark:text-gray-500">
-                  支持通过查询参数覆盖：<code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">apiMode=images</code> 或 <code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">apiMode=responses</code>。
-                </div>
-              </label>
+              {activeProfile.provider === 'openai' && (
+                <label className="block">
+                  <span className="block text-xs text-gray-500 dark:text-gray-400 mb-1">API 接口</span>
+                  <Select
+                    value={activeProfile.apiMode ?? DEFAULT_SETTINGS.apiMode}
+                    onChange={(value) => {
+                      const apiMode = value as AppSettings['apiMode']
+                      const nextModel =
+                        activeProfile.model === DEFAULT_IMAGES_MODEL || activeProfile.model === DEFAULT_RESPONSES_MODEL
+                          ? getDefaultModelForMode(apiMode)
+                          : activeProfile.model
+                      updateActiveProfile({ apiMode, model: nextModel }, true)
+                    }}
+                    options={[
+                      { label: 'Images API (/v1/images)', value: 'images' },
+                      { label: 'Responses API (/v1/responses)', value: 'responses' },
+                    ]}
+                    className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
+                  />
+                  <div data-selectable-text className="mt-1 text-[10px] text-gray-400 dark:text-gray-500">
+                    支持通过查询参数覆盖：<code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">apiMode=images</code> 或 <code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">apiMode=responses</code>。
+                  </div>
+                </label>
+              )}
 
               <label className="block">
                 <span className="block text-xs text-gray-500 dark:text-gray-400 mb-1">
                   模型 ID
                 </span>
                 <input
-                  value={draft.model}
-                  onChange={(e) => setDraft((prev) => ({ ...prev, model: e.target.value }))}
-                  onBlur={(e) => commitSettings({ ...draft, model: e.target.value })}
+                  value={activeProfile.model}
+                  onChange={(e) => updateActiveProfile({ model: e.target.value })}
+                  onBlur={(e) => commitActiveProfilePatch({ model: e.target.value })}
                   type="text"
-                  placeholder={getDefaultModelForMode(draft.apiMode ?? DEFAULT_SETTINGS.apiMode)}
+                  placeholder={activeProfile.provider === 'fal' ? DEFAULT_FAL_MODEL : getDefaultModelForMode(activeProfile.apiMode ?? DEFAULT_SETTINGS.apiMode)}
                   className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
                 />
                 <div data-selectable-text className="mt-1 text-[10px] text-gray-400 dark:text-gray-500">
-                  {(draft.apiMode ?? DEFAULT_SETTINGS.apiMode) === 'responses' ? (
+                  {activeProfile.provider === 'fal' ? (
+                    <>当前适配 <code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">{DEFAULT_FAL_MODEL}</code>。</>
+                  ) : (activeProfile.apiMode ?? DEFAULT_SETTINGS.apiMode) === 'responses' ? (
                     <>Responses API 需要使用支持 <code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">image_generation</code> 工具的文本模型，例如 <code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">{DEFAULT_RESPONSES_MODEL}</code>。</>
                   ) : (
                     <>Images API 需要使用 GPT Image 模型，例如 <code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">{DEFAULT_IMAGES_MODEL}</code>。</>
@@ -303,18 +555,20 @@ export default function SettingsModal() {
                 </div>
               </label>
 
-              <label className="block">
-                <span className="block text-xs text-gray-500 dark:text-gray-400 mb-1">请求超时 (秒)</span>
-                <input
-                  value={timeoutInput}
-                  onChange={(e) => setTimeoutInput(e.target.value)}
-                  onBlur={commitTimeout}
-                  type="number"
-                  min={10}
-                  max={600}
-                  className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
-                />
-              </label>
+              {activeProfile.provider === 'openai' && (
+                <label className="block">
+                  <span className="block text-xs text-gray-500 dark:text-gray-400 mb-1">请求超时 (秒)</span>
+                  <input
+                    value={timeoutInput}
+                    onChange={(e) => setTimeoutInput(e.target.value)}
+                    onBlur={commitTimeout}
+                    type="number"
+                    min={10}
+                    max={600}
+                    className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
+                  />
+                </label>
+              )}
             </div>
           </section>
 
@@ -424,8 +678,8 @@ export default function SettingsModal() {
                 onClick={() =>
                   setConfirmDialog({
                     title: '清空所有数据',
-                    message: '确定要清空所有任务记录和图片数据吗？此操作不可恢复。',
-                    action: () => clearAllData(),
+                    message: '确定要清空所有任务记录、图片数据和供应商配置吗？此操作不可恢复。',
+                    action: () => handleClearAllData(),
                   })
                 }
                 className="w-full rounded-xl border border-red-200/80 bg-red-50/50 px-4 py-2.5 text-sm text-red-500 transition hover:bg-red-100/80 dark:border-red-500/20 dark:bg-red-500/10 dark:text-red-400 dark:hover:bg-red-500/20"

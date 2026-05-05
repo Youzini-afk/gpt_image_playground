@@ -10,21 +10,78 @@ import type {
   StoredImage,
   CanvasImage,
 } from './types'
-import { DEFAULT_SETTINGS, DEFAULT_PARAMS } from './types'
+import { DEFAULT_PARAMS } from './types'
+import { DEFAULT_SETTINGS, getActiveApiProfile, mergeImportedSettings, normalizeSettings, validateApiProfile } from './lib/apiProfiles'
 import { hashDataUrl } from './lib/db'
 import { getStorage, setStorageMode, testServerStorage } from './lib/storage'
 import { callImageApi } from './lib/api'
+import { getFalErrorMessage, getFalQueuedImageResult, getFalQueueStatus } from './lib/falAiImageApi'
 import { validateMaskMatchesImage } from './lib/canvasImage'
 import { orderInputImagesForMask } from './lib/mask'
-import { normalizeImageSize } from './lib/size'
+import { getChangedParams, normalizeParamsForSettings } from './lib/paramCompatibility'
 import { zipSync, unzipSync, strToU8, strFromU8 } from 'fflate'
 
 // ===== Image cache =====
 // 内存缓存，id → dataUrl，避免每次从 IndexedDB 读取
 
 const imageCache = new Map<string, string>()
-// 已持久化到 storage 的 image id 集合（与 imageCache 不同，imageCache 只代表内存缓存）
 const persistedImageIds = new Set<string>()
+const FAL_RECOVERY_POLL_MS = 10_000
+const falRecoveryTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const openAIWatchdogTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const OPENAI_INTERRUPTED_ERROR = '请求中断'
+
+function createOpenAITimeoutError(timeoutSeconds: number) {
+  return `请求超时：超过 ${timeoutSeconds} 秒仍未完成，请稍后重试或提高超时时间。`
+}
+
+async function getAllTasks() {
+  return getStorage().getAllTasks()
+}
+
+async function putTask(task: TaskRecord) {
+  await getStorage().putTask(task)
+}
+
+async function dbDeleteTask(id: string) {
+  await getStorage().deleteTask(id)
+}
+
+async function dbClearTasks() {
+  await getStorage().clearTasks()
+}
+
+async function getImage(id: string) {
+  return getStorage().getImage(id)
+}
+
+async function getAllImages() {
+  return getStorage().getAllImages()
+}
+
+async function putImage(image: StoredImage) {
+  await getStorage().putImage(image)
+  persistedImageIds.add(image.id)
+}
+
+async function deleteImage(id: string) {
+  await getStorage().deleteImage(id)
+  persistedImageIds.delete(id)
+}
+
+async function clearImages() {
+  await getStorage().clearImages()
+  persistedImageIds.clear()
+}
+
+async function storeImage(dataUrl: string, source: NonNullable<StoredImage['source']> = 'upload') {
+  const id = await hashDataUrl(dataUrl)
+  imageCache.set(id, dataUrl)
+  if (!persistedImageIds.has(id)) {
+    await putImage({ id, dataUrl, createdAt: Date.now(), source })
+  }
+  return id
+}
 
 export function getCachedImage(id: string): string | undefined {
   return imageCache.get(id)
@@ -32,11 +89,9 @@ export function getCachedImage(id: string): string | undefined {
 
 export async function ensureImageCached(id: string): Promise<string | undefined> {
   if (imageCache.has(id)) return imageCache.get(id)
-  const storage = getStorage()
-  const rec = await storage.getImage(id)
+  const rec = await getImage(id)
   if (rec) {
     imageCache.set(id, rec.dataUrl)
-    persistedImageIds.add(id)
     return rec.dataUrl
   }
   return undefined
@@ -137,22 +192,41 @@ export const useStore = create<AppState>()(
     (set, get) => ({
       // Settings
       settings: { ...DEFAULT_SETTINGS },
-      setSettings: (s) => set((st) => ({
-        settings: {
-          ...st.settings,
-          ...s,
-          apiMode:
-            s.apiMode === 'images' || s.apiMode === 'responses'
-              ? s.apiMode
-              : st.settings.apiMode ?? DEFAULT_SETTINGS.apiMode,
-          codexCli: s.codexCli ?? st.settings.codexCli ?? DEFAULT_SETTINGS.codexCli,
-          apiProxy: s.apiProxy ?? st.settings.apiProxy ?? DEFAULT_SETTINGS.apiProxy,
-          editImageField:
-            s.editImageField === 'image' || s.editImageField === 'image[]'
-              ? s.editImageField
-              : st.settings.editImageField ?? DEFAULT_SETTINGS.editImageField,
-        },
-      })),
+      setSettings: (s) => set((st) => {
+        const previous = normalizeSettings(st.settings)
+        const incoming = s as Partial<AppSettings>
+        const hasLegacyOverrides =
+          incoming.baseUrl !== undefined ||
+          incoming.apiKey !== undefined ||
+          incoming.model !== undefined ||
+          incoming.timeout !== undefined ||
+          incoming.apiMode !== undefined ||
+          incoming.codexCli !== undefined ||
+          incoming.apiProxy !== undefined ||
+          incoming.editImageField !== undefined
+        const merged = normalizeSettings({ ...previous, ...incoming })
+        if (hasLegacyOverrides && incoming.profiles === undefined) {
+          merged.profiles = merged.profiles.map((profile) =>
+            profile.id === merged.activeProfileId
+              ? {
+                  ...profile,
+                  baseUrl: incoming.baseUrl ?? profile.baseUrl,
+                  apiKey: incoming.apiKey ?? profile.apiKey,
+                  model: incoming.model ?? profile.model,
+                  timeout: incoming.timeout ?? profile.timeout,
+                  apiMode: incoming.apiMode === 'images' || incoming.apiMode === 'responses' ? incoming.apiMode : profile.apiMode,
+                  codexCli: incoming.codexCli ?? profile.codexCli,
+                  apiProxy: incoming.apiProxy ?? profile.apiProxy,
+                  editImageField:
+                    incoming.editImageField === 'image' || incoming.editImageField === 'image[]'
+                      ? incoming.editImageField
+                      : profile.editImageField,
+                }
+              : profile,
+          )
+        }
+        return { settings: normalizeSettings(merged) }
+      }),
       dismissedCodexCliPrompts: [],
       dismissCodexCliPrompt: (key) => set((st) => ({
         dismissedCodexCliPrompts: st.dismissedCodexCliPrompts.includes(key)
@@ -169,7 +243,7 @@ export const useStore = create<AppState>()(
         set((s) => {
           if (s.inputImages.find((i) => i.id === img.id)) return s
           const inputImages = [...s.inputImages, img]
-          return { inputImages, inputImageIds: inputImages.map((i) => i.id) }
+          return { inputImages, inputImageIds: inputImages.map((image) => image.id) }
         }),
       removeInputImage: (idx) =>
         set((s) => {
@@ -178,7 +252,7 @@ export const useStore = create<AppState>()(
           const inputImages = s.inputImages.filter((_, i) => i !== idx)
           return {
             inputImages,
-            inputImageIds: inputImages.map((img) => img.id),
+            inputImageIds: inputImages.map((image) => image.id),
             ...(shouldClearMask ? { maskDraft: null, maskEditorImageId: null } : {}),
           }
         }),
@@ -194,7 +268,7 @@ export const useStore = create<AppState>()(
             Boolean(s.maskDraft) && !inputImages.some((img) => img.id === s.maskDraft?.targetImageId)
           return {
             inputImages,
-            inputImageIds: inputImages.map((img) => img.id),
+            inputImageIds: inputImages.map((image) => image.id),
             ...(shouldClearMask ? { maskDraft: null, maskEditorImageId: null } : {}),
           }
         }),
@@ -210,7 +284,7 @@ export const useStore = create<AppState>()(
           if (insertIdx === fromIdx) return s
           const [moved] = images.splice(fromIdx, 1)
           images.splice(insertIdx, 0, moved)
-          return { inputImages: images, inputImageIds: images.map((img) => img.id) }
+          return { inputImages: images, inputImageIds: images.map((image) => image.id) }
         }),
       maskDraft: null,
       setMaskDraft: (maskDraft) =>
@@ -219,7 +293,7 @@ export const useStore = create<AppState>()(
           return {
             maskDraft,
             inputImages,
-            inputImageIds: inputImages.map((img) => img.id),
+            inputImageIds: inputImages.map((image) => image.id),
           }
         }),
       clearMaskDraft: () => set({ maskDraft: null }),
@@ -292,7 +366,8 @@ export const useStore = create<AppState>()(
         settings: state.settings,
         params: state.params,
         inputImageIds: state.inputImageIds,
-        maskDraft: state.maskDraft,
+        prompt: state.prompt,
+        inputImages: state.inputImages.map((img) => ({ id: img.id, dataUrl: '' })),
         dismissedCodexCliPrompts: state.dismissedCodexCliPrompts,
       }),
     },
@@ -313,14 +388,34 @@ export async function waitForStoreHydration(): Promise<void> {
     if (result instanceof Promise) {
       result.catch((err) => {
         console.error('store hydration failed:', err)
+        unsubscribe()
+        resolve()
       })
     }
-
-    if (persistApi.hasHydrated()) {
-      unsubscribe()
-      resolve()
-    }
   })
+}
+
+export async function initStorageMode() {
+  const settings = normalizeSettings(useStore.getState().settings)
+  if (settings.storageMode === 'server') {
+    const result = await testServerStorage()
+    if (result.ok) {
+      setStorageMode('server')
+    } else {
+      setStorageMode('local')
+      useStore.getState().setSettings({ storageMode: 'local' })
+      useStore.getState().showToast(`服务器存储不可用，已切换到本地存储${result.error ? `：${result.error}` : ''}`, 'error')
+    }
+  } else {
+    setStorageMode('local')
+  }
+}
+
+export async function switchStorageMode(mode: 'local' | 'server') {
+  setStorageMode(mode)
+  imageCache.clear()
+  persistedImageIds.clear()
+  await initStore()
 }
 
 // ===== Actions =====
@@ -330,33 +425,72 @@ function genId(): string {
   return Date.now().toString(36) + (++uid).toString(36) + Math.random().toString(36).slice(2, 6)
 }
 
-/** Initialize storage mode based on settings with runtime fallback. */
-export async function initStorageMode() {
-  const { settings, setSettings } = useStore.getState()
-  if (settings.storageMode === 'server') {
-    const result = await testServerStorage()
-    if (result.ok) {
-      setStorageMode('server')
-      return
-    }
-    console.warn('server storage unavailable on init, fallback to local:', result.error || 'unknown error')
-    setStorageMode('local')
-    setSettings({ storageMode: 'local' })
-    return
-  }
-  setStorageMode('local')
-}
-
-/** Switch storage mode and reload data from the new backend */
-export async function switchStorageMode(mode: 'local' | 'server') {
-  setStorageMode(mode)
-  imageCache.clear()
-  persistedImageIds.clear()
-  await initStore()
-}
-
 export function getCodexCliPromptKey(settings: AppSettings): string {
-  return `${settings.baseUrl}\n${settings.apiKey}`
+  const profile = getActiveApiProfile(settings)
+  return `${profile.baseUrl}\n${profile.apiKey}`
+}
+
+function isOpenAITask(task: TaskRecord) {
+  return (task.apiProvider ?? 'openai') === 'openai'
+}
+
+function isRunningOpenAITask(task: TaskRecord) {
+  return task.status === 'running' && isOpenAITask(task)
+}
+
+export function markInterruptedOpenAIRunningTasks(tasks: TaskRecord[], now = Date.now()) {
+  const interruptedTasks: TaskRecord[] = []
+  const updatedTasks = tasks.map((task) => {
+    if (!isRunningOpenAITask(task)) return task
+
+    const updated: TaskRecord = {
+      ...task,
+      status: 'error',
+      error: OPENAI_INTERRUPTED_ERROR,
+      falRecoverable: false,
+      finishedAt: now,
+      elapsed: Math.max(0, now - task.createdAt),
+    }
+    interruptedTasks.push(updated)
+    return updated
+  })
+
+  return { tasks: updatedTasks, interruptedTasks }
+}
+
+function clearOpenAIWatchdogTimer(taskId: string) {
+  const timer = openAIWatchdogTimers.get(taskId)
+  if (timer) clearTimeout(timer)
+  openAIWatchdogTimers.delete(taskId)
+}
+
+function failOpenAITaskIfStillRunning(taskId: string, error: string, now = Date.now()) {
+  const task = useStore.getState().tasks.find((item) => item.id === taskId)
+  if (!task || !isRunningOpenAITask(task)) return false
+
+  updateTaskInStore(taskId, {
+    status: 'error',
+    error,
+    falRecoverable: false,
+    finishedAt: now,
+    elapsed: Math.max(0, now - task.createdAt),
+  })
+  return true
+}
+
+function scheduleOpenAIWatchdog(taskId: string, timeoutSeconds: number) {
+  clearOpenAIWatchdogTimer(taskId)
+  const task = useStore.getState().tasks.find((item) => item.id === taskId)
+  if (!task || !isRunningOpenAITask(task)) return
+
+  const timeoutMs = Math.max(0, timeoutSeconds * 1000)
+  const remainingMs = Math.max(0, timeoutMs - (Date.now() - task.createdAt))
+  const timer = setTimeout(() => {
+    openAIWatchdogTimers.delete(taskId)
+    const failed = failOpenAITaskIfStillRunning(taskId, createOpenAITimeoutError(timeoutSeconds))
+    if (failed) useStore.getState().showToast('OpenAI 任务请求超时', 'error')
+  }, remainingMs)
+  openAIWatchdogTimers.set(taskId, timer)
 }
 
 export function showCodexCliPrompt(force = false, reason = '接口返回的提示词已被改写') {
@@ -378,108 +512,205 @@ export function showCodexCliPrompt(force = false, reason = '接口返回的提�
   })
 }
 
-function normalizeParamsForSettings(params: TaskParams, settings: AppSettings): TaskParams {
-  return {
-    ...params,
-    size: normalizeImageSize(params.size) || DEFAULT_PARAMS.size,
-    quality: settings.codexCli ? DEFAULT_PARAMS.quality : params.quality,
-  }
+function getFalRecoveryProfile(settings: AppSettings, task: TaskRecord) {
+  const normalized = normalizeSettings(settings)
+  const active = getActiveApiProfile(normalized)
+  if (active.provider === 'fal') return active
+  return normalized.profiles.find((profile) =>
+    profile.provider === 'fal' &&
+    (profile.name === task.apiProfileName || profile.model === task.apiModel),
+  ) ?? normalized.profiles.find((profile) => profile.provider === 'fal') ?? null
 }
 
-/** 初始化：从存储加载任务和图片缓存，清理孤立图片 */
-export async function initStore() {
+function isFalConnectionRecoverableError(err: unknown) {
+  if (typeof DOMException !== 'undefined' && err instanceof DOMException && err.name === 'AbortError') return true
+  const message = err instanceof Error ? err.message : String(err)
+  return /abort|network|failed to fetch|fetch failed|load failed|timeout|连接|断开|中断/i.test(message)
+}
+
+function clearFalRecoveryTimer(taskId: string) {
+  const timer = falRecoveryTimers.get(taskId)
+  if (timer) clearTimeout(timer)
+  falRecoveryTimers.delete(taskId)
+}
+
+function scheduleFalRecovery(taskId: string, delayMs = FAL_RECOVERY_POLL_MS) {
+  if (falRecoveryTimers.has(taskId)) return
+  const timer = setTimeout(() => {
+    falRecoveryTimers.delete(taskId)
+    recoverFalTask(taskId)
+  }, delayMs)
+  falRecoveryTimers.set(taskId, timer)
+}
+
+async function completeRecoveredFalTask(task: TaskRecord, result: Awaited<ReturnType<typeof getFalQueuedImageResult>>) {
+  const latest = useStore.getState().tasks.find((item) => item.id === task.id)
+  if (!latest || latest.status === 'done') return
+
+  const outputIds: string[] = []
+  for (const dataUrl of result.images) {
+    const imgId = await storeImage(dataUrl, 'generated')
+    imageCache.set(imgId, dataUrl)
+    outputIds.push(imgId)
+  }
+
+  updateTaskInStore(task.id, {
+    outputImages: outputIds,
+    actualParams: undefined,
+    actualParamsByImage: undefined,
+    revisedPromptByImage: undefined,
+    status: 'done',
+    error: null,
+    falRecoverable: false,
+    finishedAt: Date.now(),
+    elapsed: Date.now() - task.createdAt,
+  })
+  useStore.getState().showToast(`fal.ai 任务已恢复，共 ${outputIds.length} 张图片`, 'success')
+}
+
+async function recoverFalTask(taskId: string) {
+  const { settings, tasks } = useStore.getState()
+  const task = tasks.find((item) => item.id === taskId)
+  if (!task || task.apiProvider !== 'fal' || !task.falRequestId || !task.falEndpoint || task.status === 'done') return
+
+  const profile = getFalRecoveryProfile(settings, task)
+  if (!profile) {
+    scheduleFalRecovery(taskId)
+    return
+  }
+
   try {
-    const storage = getStorage()
-    const savedInputImageIds = [...useStore.getState().inputImageIds]
-    const savedMaskDraft = useStore.getState().maskDraft
-    const tasks = await storage.getAllTasks()
-    useStore.getState().setTasks(tasks)
-
-    const canvasImages = await storage.getAllCanvasImages()
-    useStore.getState().setCanvasImages(canvasImages)
-
-    const referencedIds = new Set<string>()
-    for (const t of tasks) {
-      for (const id of t.inputImageIds || []) referencedIds.add(id)
-      if (t.maskImageId) referencedIds.add(t.maskImageId)
-      for (const id of t.outputImages || []) referencedIds.add(id)
-    }
-    for (const ci of canvasImages) {
-      referencedIds.add(ci.imageId)
-    }
-    for (const id of savedInputImageIds) referencedIds.add(id)
-    if (savedMaskDraft?.targetImageId) referencedIds.add(savedMaskDraft.targetImageId)
-
-    const images = await storage.getAllImages()
-    for (const img of images) {
-      if (referencedIds.has(img.id)) {
-        imageCache.set(img.id, img.dataUrl)
-        persistedImageIds.add(img.id)
-      }
+    const status = await getFalQueueStatus(profile, task.falEndpoint, task.falRequestId)
+    if (status.status === 'COMPLETED') {
+      clearFalRecoveryTimer(taskId)
+      const result = await getFalQueuedImageResult(profile, task.falEndpoint, task.falRequestId, task.params)
+      await completeRecoveredFalTask(task, result)
+      return
     }
 
-    const restoredInputs: InputImage[] = []
-    for (const id of savedInputImageIds) {
-      const dataUrl = await ensureImageCached(id)
-      if (dataUrl) restoredInputs.push({ id, dataUrl })
+    if (task.status !== 'running') {
+      updateTaskInStore(taskId, {
+        status: 'running',
+        error: null,
+        falRecoverable: true,
+        finishedAt: null,
+        elapsed: null,
+      })
     }
-    useStore.getState().setInputImages(restoredInputs)
-
-    if (savedMaskDraft) {
-      const hasTarget = restoredInputs.some((img) => img.id === savedMaskDraft.targetImageId)
-      const maskDataUrl = hasTarget ? await ensureImageCached(await storeImageData(savedMaskDraft.maskDataUrl, 'mask')) : undefined
-      if (hasTarget && maskDataUrl) {
-        useStore.getState().setMaskDraft(savedMaskDraft)
-      } else {
-        useStore.getState().clearMaskDraft()
-      }
-    }
+    scheduleFalRecovery(taskId)
   } catch (err) {
-    console.error('initStore failed:', err)
+    if (isFalConnectionRecoverableError(err)) {
+      scheduleFalRecovery(taskId)
+      return
+    }
+
+    clearFalRecoveryTimer(taskId)
+    updateTaskInStore(taskId, {
+      status: 'error',
+      error: getFalErrorMessage(err) ?? (err instanceof Error ? err.message : String(err)),
+      falRecoverable: false,
+      finishedAt: Date.now(),
+      elapsed: Date.now() - task.createdAt,
+    })
   }
 }
 
-/** 存储图片到当前存储后端，若已存在则跳过。返回 image id。 */
+/** 初始化：从当前存储加载任务、画布和图片缓存，清理孤立图片 */
+export async function initStore() {
+  const storedTasks = await getAllTasks()
+  const { tasks, interruptedTasks } = markInterruptedOpenAIRunningTasks(storedTasks)
+  await Promise.all(interruptedTasks.map((task) => putTask(task)))
+  useStore.getState().setTasks(tasks)
+  for (const task of tasks) {
+    if (
+      task.apiProvider === 'fal' &&
+      task.falRequestId &&
+      task.falEndpoint &&
+      (task.status === 'running' || task.falRecoverable)
+    ) {
+      scheduleFalRecovery(task.id, 0)
+    }
+  }
 
-let _canvasIdCounter = 0
+  const canvasImages = await getStorage().getAllCanvasImages()
+  useStore.getState().setCanvasImages(canvasImages)
+
+  // 收集所有任务引用的图片 id
+  const referencedIds = new Set<string>()
+  const state = useStore.getState()
+  const persistedInputImages = state.inputImages.length
+    ? state.inputImages
+    : state.inputImageIds.map((id) => ({ id, dataUrl: '' }))
+  for (const img of persistedInputImages) referencedIds.add(img.id)
+  for (const t of tasks) {
+    for (const id of t.inputImageIds || []) referencedIds.add(id)
+    if (t.maskImageId) referencedIds.add(t.maskImageId)
+    for (const id of t.outputImages || []) {
+      referencedIds.add(id)
+    }
+  }
+  for (const canvasImage of canvasImages) {
+    referencedIds.add(canvasImage.imageId)
+  }
+  if (state.maskDraft?.targetImageId) {
+    referencedIds.add(state.maskDraft.targetImageId)
+  }
+
+  // 预加载所有图片到缓存，同时清理孤立图片
+  const images = await getAllImages()
+  const imageById = new Map(images.map((img) => [img.id, img]))
+  for (const img of images) {
+    if (referencedIds.has(img.id)) {
+      imageCache.set(img.id, img.dataUrl)
+      persistedImageIds.add(img.id)
+    } else {
+      await deleteImage(img.id)
+    }
+  }
+  const restoredInputImages = persistedInputImages
+    .map((img) => ({ ...img, dataUrl: img.dataUrl || imageById.get(img.id)?.dataUrl || '' }))
+    .filter((img) => img.dataUrl)
+  if (restoredInputImages.length !== persistedInputImages.length || restoredInputImages.some((img, index) => img.dataUrl !== persistedInputImages[index]?.dataUrl)) {
+    useStore.getState().setInputImages(restoredInputImages)
+  }
+}
+
 function genCanvasId(): string {
-  return 'ci_' + Date.now().toString(36) + (++_canvasIdCounter).toString(36) + Math.random().toString(36).slice(2, 6)
+  return `canvas-${genId()}`
 }
 
 /** 添加图片到画布工作台 */
 export async function addImageToCanvas(dataUrl: string, label?: string): Promise<string> {
-  const imgId = await storeImageData(dataUrl, 'upload')
-  const canvasId = genCanvasId()
+  const imageId = await storeImage(dataUrl, 'upload')
   const canvasImage: CanvasImage = {
-    id: canvasId,
-    imageId: imgId,
+    id: genCanvasId(),
+    imageId,
     label: label || '',
     createdAt: Date.now(),
   }
   await getStorage().putCanvasImage(canvasImage)
   useStore.getState().setCanvasImages([canvasImage, ...useStore.getState().canvasImages])
-  return canvasId
+  return canvasImage.id
 }
 
 /** 从画布工作台移除图片 */
 export async function removeCanvasImage(canvasImage: CanvasImage) {
   const { canvasImages, tasks, inputImages } = useStore.getState()
-  const remaining = canvasImages.filter((ci) => ci.id !== canvasImage.id)
+  const remaining = canvasImages.filter((item) => item.id !== canvasImage.id)
   useStore.getState().setCanvasImages(remaining)
   await getStorage().deleteCanvasImage(canvasImage.id)
 
   const stillUsed = new Set<string>()
-  for (const t of tasks) {
-    for (const id of t.inputImageIds || []) stillUsed.add(id)
-    if (t.maskImageId) stillUsed.add(t.maskImageId)
-    for (const id of t.outputImages || []) stillUsed.add(id)
+  for (const task of tasks) {
+    for (const id of task.inputImageIds || []) stillUsed.add(id)
+    if (task.maskImageId) stillUsed.add(task.maskImageId)
+    for (const id of task.outputImages || []) stillUsed.add(id)
   }
-  for (const ci of remaining) stillUsed.add(ci.imageId)
-  for (const img of inputImages) stillUsed.add(img.id)
+  for (const item of remaining) stillUsed.add(item.imageId)
+  for (const image of inputImages) stillUsed.add(image.id)
   if (!stillUsed.has(canvasImage.imageId)) {
-    await getStorage().deleteImage(canvasImage.imageId)
+    await deleteImage(canvasImage.imageId)
     imageCache.delete(canvasImage.imageId)
-    persistedImageIds.delete(canvasImage.imageId)
   }
 }
 
@@ -495,27 +726,12 @@ export async function addCanvasImageToInput(canvasImage: CanvasImage) {
     useStore.getState().showToast('图片数据已不存在', 'error')
     return
   }
-  if (inputImages.find((i) => i.id === canvasImage.imageId)) {
+  if (inputImages.find((image) => image.id === canvasImage.imageId)) {
     useStore.getState().showToast('该图片已在参考图中', 'info')
     return
   }
   useStore.getState().addInputImage({ id: canvasImage.imageId, dataUrl })
   useStore.getState().showToast('已添加到参考图', 'success')
-}
-async function storeImageData(dataUrl: string, source: NonNullable<StoredImage['source']> = 'upload'): Promise<string> {
-  const id = await hashDataUrl(dataUrl)
-  if (persistedImageIds.has(id)) {
-    imageCache.set(id, dataUrl)
-    return id
-  }
-  const storage = getStorage()
-  const existing = await storage.getImage(id)
-  if (!existing) {
-    await storage.putImage({ id, dataUrl, createdAt: Date.now(), source })
-  }
-  persistedImageIds.add(id)
-  imageCache.set(id, dataUrl)
-  return id
 }
 
 /** 提交新任务 */
@@ -523,8 +739,9 @@ export async function submitTask(options: { allowFullMask?: boolean } = {}) {
   const { settings, prompt, inputImages, maskDraft, params, showToast, setConfirmDialog } =
     useStore.getState()
 
-  if (!settings.apiKey) {
-    showToast('请先在设置中配置 API Key', 'error')
+  const activeProfile = getActiveApiProfile(settings)
+  if (validateApiProfile(activeProfile)) {
+    showToast(`请先完善当前 Provider：${validateApiProfile(activeProfile)}`, 'error')
     useStore.getState().setShowSettings(true)
     return
   }
@@ -554,7 +771,7 @@ export async function submitTask(options: { allowFullMask?: boolean } = {}) {
         })
         return
       }
-      maskImageId = await storeImageData(maskDraft.maskDataUrl, 'mask')
+      maskImageId = await storeImage(maskDraft.maskDataUrl, 'mask')
       imageCache.set(maskImageId, maskDraft.maskDataUrl)
       maskTargetImageId = maskDraft.targetImageId
     } catch (err) {
@@ -566,14 +783,15 @@ export async function submitTask(options: { allowFullMask?: boolean } = {}) {
     }
   }
 
-  // 持久化输入图片到存储（此前只在内存缓存中）
+  // 持久化输入图片到 IndexedDB（此前只在内存缓存中）
   for (const img of orderedInputImages) {
-    await storeImageData(img.dataUrl)
+    await storeImage(img.dataUrl)
   }
 
   const normalizedParams = normalizeParamsForSettings(params, settings)
-  if (normalizedParams.size !== params.size || normalizedParams.quality !== params.quality) {
-    useStore.getState().setParams({ size: normalizedParams.size, quality: normalizedParams.quality })
+  const normalizedParamPatch = getChangedParams(params, normalizedParams)
+  if (Object.keys(normalizedParamPatch).length) {
+    useStore.getState().setParams(normalizedParamPatch)
   }
 
   const taskId = genId()
@@ -581,6 +799,9 @@ export async function submitTask(options: { allowFullMask?: boolean } = {}) {
     id: taskId,
     prompt: prompt.trim(),
     params: normalizedParams,
+    apiProvider: activeProfile.provider,
+    apiProfileName: activeProfile.name,
+    apiModel: activeProfile.model,
     inputImageIds: orderedInputImages.map((i) => i.id),
     maskTargetImageId,
     maskImageId,
@@ -594,7 +815,12 @@ export async function submitTask(options: { allowFullMask?: boolean } = {}) {
 
   const latestTasks = useStore.getState().tasks
   useStore.getState().setTasks([task, ...latestTasks])
-  await getStorage().putTask(task)
+  await putTask(task)
+
+  if (settings.clearInputAfterSubmit) {
+    useStore.getState().setPrompt('')
+    useStore.getState().clearInputImages()
+  }
 
   // 异步调用 API
   executeTask(taskId)
@@ -604,6 +830,15 @@ async function executeTask(taskId: string) {
   const { settings } = useStore.getState()
   const task = useStore.getState().tasks.find((t) => t.id === taskId)
   if (!task) return
+  const activeProfile = getActiveApiProfile(settings)
+  const taskProvider = task.apiProvider ?? activeProfile.provider
+  let falRequestInfo: { requestId: string; endpoint: string } | null = task.falRequestId && task.falEndpoint
+    ? { requestId: task.falRequestId, endpoint: task.falEndpoint }
+    : null
+
+  if (taskProvider === 'openai') {
+    scheduleOpenAIWatchdog(taskId, activeProfile.timeout)
+  }
 
   try {
     // 获取输入图片 data URLs
@@ -625,30 +860,42 @@ async function executeTask(taskId: string) {
       params: task.params,
       inputImageDataUrls: inputDataUrls,
       maskDataUrl,
+      onFalRequestEnqueued: (request) => {
+        falRequestInfo = request
+        updateTaskInStore(taskId, {
+          falRequestId: request.requestId,
+          falEndpoint: request.endpoint,
+          falRecoverable: false,
+        })
+      },
     })
+
+    const latestBeforeSuccess = useStore.getState().tasks.find((t) => t.id === taskId)
+    if (!latestBeforeSuccess || latestBeforeSuccess.status !== 'running') return
 
     // 存储输出图片
     const outputIds: string[] = []
     for (const dataUrl of result.images) {
-      const imgId = await storeImageData(dataUrl, 'generated')
+      const imgId = await storeImage(dataUrl, 'generated')
       imageCache.set(imgId, dataUrl)
       outputIds.push(imgId)
     }
-    const actualParamsByImage = result.actualParamsList?.reduce<Record<string, Partial<TaskParams>>>((acc, params, index) => {
+    const shouldStoreApiResponseMetadata = taskProvider !== 'fal'
+    const actualParamsByImage = shouldStoreApiResponseMetadata ? result.actualParamsList?.reduce<Record<string, Partial<TaskParams>>>((acc, params, index) => {
       const imgId = outputIds[index]
       if (imgId && params && Object.keys(params).length > 0) acc[imgId] = params
       return acc
-    }, {})
-    const revisedPromptByImage = result.revisedPrompts?.reduce<Record<string, string>>((acc, revisedPrompt, index) => {
+    }, {}) : undefined
+    const revisedPromptByImage = shouldStoreApiResponseMetadata ? result.revisedPrompts?.reduce<Record<string, string>>((acc, revisedPrompt, index) => {
       const imgId = outputIds[index]
       if (imgId && revisedPrompt && revisedPrompt.trim()) acc[imgId] = revisedPrompt
       return acc
-    }, {})
-    const promptWasRevised = result.revisedPrompts?.some(
+    }, {}) : undefined
+    const promptWasRevised = shouldStoreApiResponseMetadata && result.revisedPrompts?.some(
       (revisedPrompt) => revisedPrompt?.trim() && revisedPrompt.trim() !== task.prompt.trim(),
     )
-    const hasRevisedPromptValue = result.revisedPrompts?.some((revisedPrompt) => revisedPrompt?.trim())
-    if (!settings.codexCli) {
+    const hasRevisedPromptValue = shouldStoreApiResponseMetadata && result.revisedPrompts?.some((revisedPrompt) => revisedPrompt?.trim())
+    if (taskProvider === 'openai' && !activeProfile.codexCli) {
       if (promptWasRevised) {
         showCodexCliPrompt()
       } else if (!hasRevisedPromptValue) {
@@ -657,14 +904,18 @@ async function executeTask(taskId: string) {
     }
 
     // 更新任务
+    const latestBeforeUpdate = useStore.getState().tasks.find((t) => t.id === taskId)
+    if (!latestBeforeUpdate || latestBeforeUpdate.status !== 'running') return
+    clearOpenAIWatchdogTimer(taskId)
     updateTaskInStore(taskId, {
       outputImages: outputIds,
-      actualParams: { ...result.actualParams, n: outputIds.length },
+      actualParams: shouldStoreApiResponseMetadata ? { ...result.actualParams, n: outputIds.length } : undefined,
       actualParamsByImage: actualParamsByImage && Object.keys(actualParamsByImage).length > 0 ? actualParamsByImage : undefined,
       revisedPromptByImage: revisedPromptByImage && Object.keys(revisedPromptByImage).length > 0 ? revisedPromptByImage : undefined,
       status: 'done',
       finishedAt: Date.now(),
       elapsed: Date.now() - task.createdAt,
+      falRecoverable: false,
     })
 
     useStore.getState().showToast(`生成完成，共 ${outputIds.length} 张图片`, 'success')
@@ -678,18 +929,38 @@ async function executeTask(taskId: string) {
       useStore.getState().clearMaskDraft()
     }
   } catch (err) {
-    updateTaskInStore(taskId, {
-      status: 'error',
-      error: err instanceof Error ? err.message : String(err),
-      finishedAt: Date.now(),
-      elapsed: Date.now() - task.createdAt,
-    })
-    useStore.getState().setDetailTaskId(taskId)
-  }
-
-  // 释放输入图片的内存缓存（已持久化到 IndexedDB，后续按需从 DB 加载）
-  for (const imgId of task.inputImageIds) {
-    imageCache.delete(imgId)
+    clearOpenAIWatchdogTimer(taskId)
+    const latestTask = useStore.getState().tasks.find((t) => t.id === taskId) ?? task
+    if (latestTask.status !== 'running') return
+    const latestFalRequestInfo = falRequestInfo ?? (latestTask.falRequestId && latestTask.falEndpoint
+      ? { requestId: latestTask.falRequestId, endpoint: latestTask.falEndpoint }
+      : null)
+    if (latestTask.apiProvider === 'fal' && latestFalRequestInfo && isFalConnectionRecoverableError(err)) {
+      updateTaskInStore(taskId, {
+        status: 'error',
+        error: '与 fal.ai 的连接已断开，连接恢复后会自动查询任务结果。',
+        falRequestId: latestFalRequestInfo.requestId,
+        falEndpoint: latestFalRequestInfo.endpoint,
+        falRecoverable: true,
+        finishedAt: Date.now(),
+        elapsed: Date.now() - task.createdAt,
+      })
+      scheduleFalRecovery(taskId)
+    } else {
+      updateTaskInStore(taskId, {
+        status: 'error',
+        error: err instanceof Error ? err.message : String(err),
+        falRecoverable: false,
+        finishedAt: Date.now(),
+        elapsed: Date.now() - task.createdAt,
+      })
+      useStore.getState().setDetailTaskId(taskId)
+    }
+  } finally {
+    // 释放输入图片的内存缓存（已持久化到 IndexedDB，后续按需从 DB 加载）
+    for (const imgId of task.inputImageIds) {
+      imageCache.delete(imgId)
+    }
   }
 }
 
@@ -700,18 +971,22 @@ export function updateTaskInStore(taskId: string, patch: Partial<TaskRecord>) {
   )
   setTasks(updated)
   const task = updated.find((t) => t.id === taskId)
-  if (task) getStorage().putTask(task).catch((err) => console.error('putTask failed:', err))
+  if (task) putTask(task)
 }
 
 /** 重试失败的任务：创建新任务并执行 */
 export async function retryTask(task: TaskRecord) {
   const { settings } = useStore.getState()
+  const activeProfile = getActiveApiProfile(settings)
   const normalizedParams = normalizeParamsForSettings(task.params, settings)
   const taskId = genId()
   const newTask: TaskRecord = {
     id: taskId,
     prompt: task.prompt,
     params: normalizedParams,
+    apiProvider: activeProfile.provider,
+    apiProfileName: activeProfile.name,
+    apiModel: activeProfile.model,
     inputImageIds: [...task.inputImageIds],
     maskTargetImageId: task.maskTargetImageId ?? null,
     maskImageId: task.maskImageId ?? null,
@@ -725,16 +1000,16 @@ export async function retryTask(task: TaskRecord) {
 
   const latestTasks = useStore.getState().tasks
   useStore.getState().setTasks([newTask, ...latestTasks])
-  await getStorage().putTask(newTask)
+  await putTask(newTask)
 
   executeTask(taskId)
 }
 
 /** 复用配置 */
 export async function reuseConfig(task: TaskRecord) {
-  const { setPrompt, setParams, setInputImages, setMaskDraft, clearMaskDraft, showToast } = useStore.getState()
+  const { settings, setPrompt, setParams, setInputImages, setMaskDraft, clearMaskDraft, showToast } = useStore.getState()
   setPrompt(task.prompt)
-  setParams(task.params)
+  setParams(normalizeParamsForSettings(task.params, settings))
 
   // 恢复输入图片
   const imgs: InputImage[] = []
@@ -782,7 +1057,7 @@ export async function editOutputs(task: TaskRecord) {
 
 /** 删除多条任务 */
 export async function removeMultipleTasks(taskIds: string[]) {
-  const { tasks, setTasks, inputImages, showToast, clearSelection, selectedTaskIds } = useStore.getState()
+  const { tasks, setTasks, inputImages, canvasImages, showToast, clearSelection, selectedTaskIds } = useStore.getState()
   
   if (!taskIds.length) return
 
@@ -800,9 +1075,8 @@ export async function removeMultipleTasks(taskIds: string[]) {
   }
 
   setTasks(remaining)
-  const storage = getStorage()
   for (const id of taskIds) {
-    await storage.deleteTask(id)
+    await dbDeleteTask(id)
   }
 
   // 找出其他任务仍引用的图片
@@ -813,13 +1087,13 @@ export async function removeMultipleTasks(taskIds: string[]) {
     for (const id of t.outputImages || []) stillUsed.add(id)
   }
   for (const img of inputImages) stillUsed.add(img.id)
+  for (const canvasImage of canvasImages) stillUsed.add(canvasImage.imageId)
 
   // 删除孤立图片
   for (const imgId of deletedImageIds) {
     if (!stillUsed.has(imgId)) {
-      await storage.deleteImage(imgId)
+      await deleteImage(imgId)
       imageCache.delete(imgId)
-      persistedImageIds.delete(imgId)
     }
   }
 
@@ -834,7 +1108,7 @@ export async function removeMultipleTasks(taskIds: string[]) {
 
 /** 删除单条任务 */
 export async function removeTask(task: TaskRecord) {
-  const { tasks, setTasks, inputImages, showToast } = useStore.getState()
+  const { tasks, setTasks, inputImages, canvasImages, showToast } = useStore.getState()
 
   // 收集此任务关联的图片
   const taskImageIds = new Set([
@@ -846,7 +1120,7 @@ export async function removeTask(task: TaskRecord) {
   // 从列表移除
   const remaining = tasks.filter((t) => t.id !== task.id)
   setTasks(remaining)
-  await getStorage().deleteTask(task.id)
+  await dbDeleteTask(task.id)
 
   // 找出其他任务仍引用的图片
   const stillUsed = new Set<string>()
@@ -856,13 +1130,13 @@ export async function removeTask(task: TaskRecord) {
     for (const id of t.outputImages || []) stillUsed.add(id)
   }
   for (const img of inputImages) stillUsed.add(img.id)
+  for (const canvasImage of canvasImages) stillUsed.add(canvasImage.imageId)
 
   // 删除孤立图片
   for (const imgId of taskImageIds) {
     if (!stillUsed.has(imgId)) {
-      await getStorage().deleteImage(imgId)
+      await deleteImage(imgId)
       imageCache.delete(imgId)
-      persistedImageIds.delete(imgId)
     }
   }
 
@@ -871,10 +1145,9 @@ export async function removeTask(task: TaskRecord) {
 
 /** 清空所有数据（含配置重置） */
 export async function clearAllData() {
-  const storage = getStorage()
-  await storage.clearTasks()
-  await storage.clearImages()
-  await storage.clearCanvasImages()
+  await dbClearTasks()
+  await clearImages()
+  await getStorage().clearCanvasImages()
   imageCache.clear()
   persistedImageIds.clear()
   const { setTasks, setCanvasImages, clearInputImages, clearMaskDraft, setSettings, setParams, showToast } = useStore.getState()
@@ -912,9 +1185,9 @@ function bytesToDataUrl(bytes: Uint8Array, filePath: string): string {
 /** 导出数据为 ZIP */
 export async function exportData() {
   try {
-    const storage = getStorage()
-    const tasks = await storage.getAllTasks()
-    const images = await storage.getAllImages()
+    const tasks = await getAllTasks()
+    const images = await getAllImages()
+    const canvasImages = await getStorage().getAllCanvasImages()
     const { settings } = useStore.getState()
     const exportedAt = Date.now()
     const imageCreatedAtFallback = new Map<string, number>()
@@ -931,6 +1204,12 @@ export async function exportData() {
         }
       }
     }
+    for (const canvasImage of canvasImages) {
+      const prev = imageCreatedAtFallback.get(canvasImage.imageId)
+      if (prev == null || canvasImage.createdAt < prev) {
+        imageCreatedAtFallback.set(canvasImage.imageId, canvasImage.createdAt)
+      }
+    }
 
     const imageFiles: ExportData['imageFiles'] = {}
     const zipFiles: Record<string, Uint8Array | [Uint8Array, { mtime: Date }]> = {}
@@ -943,7 +1222,6 @@ export async function exportData() {
       zipFiles[path] = [bytes, { mtime: new Date(createdAt) }]
     }
 
-    const canvasImages = useStore.getState().canvasImages
     const manifest: ExportData = {
       version: 3,
       exportedAt: new Date(exportedAt).toISOString(),
@@ -975,7 +1253,7 @@ export async function exportData() {
 }
 
 /** 导入 ZIP 数据 */
-export async function importData(file: File) {
+export async function importData(file: File): Promise<boolean> {
   try {
     const buffer = await file.arrayBuffer()
     const unzipped = unzipSync(new Uint8Array(buffer))
@@ -991,32 +1269,32 @@ export async function importData(file: File) {
       const bytes = unzipped[info.path]
       if (!bytes) continue
       const dataUrl = bytesToDataUrl(bytes, info.path)
-      await getStorage().putImage({ id, dataUrl, createdAt: info.createdAt, source: info.source })
+      await putImage({ id, dataUrl, createdAt: info.createdAt, source: info.source })
       imageCache.set(id, dataUrl)
     }
 
     for (const task of data.tasks) {
-      await getStorage().putTask(task)
+      await putTask(task)
     }
 
-    // 还原画布图片
-    if (data.canvasImages && data.canvasImages.length > 0) {
-      for (const ci of data.canvasImages) {
-        await getStorage().putCanvasImage(ci)
+    if (data.canvasImages?.length) {
+      for (const canvasImage of data.canvasImages) {
+        await getStorage().putCanvasImage(canvasImage)
       }
-      const canvasImages = await getStorage().getAllCanvasImages()
-      useStore.getState().setCanvasImages(canvasImages)
+      useStore.getState().setCanvasImages(await getStorage().getAllCanvasImages())
     }
 
     if (data.settings) {
-      useStore.getState().setSettings(data.settings)
+      const state = useStore.getState()
+      state.setSettings(mergeImportedSettings(state.settings, data.settings))
     }
 
-    const tasks = await getStorage().getAllTasks()
+    const tasks = await getAllTasks()
     useStore.getState().setTasks(tasks)
     useStore
       .getState()
       .showToast(`已导入 ${data.tasks.length} 条记录`, 'success')
+    return true
   } catch (e) {
     useStore
       .getState()
@@ -1024,14 +1302,15 @@ export async function importData(file: File) {
         `导入失败：${e instanceof Error ? e.message : String(e)}`,
         'error',
       )
+    return false
   }
 }
 
-/** 添加图片到输入（文件上传）—— 放入内存缓存并添加到画布 */
+/** 添加图片到输入（文件上传） */
 export async function addImageFromFile(file: File): Promise<void> {
   if (!file.type.startsWith('image/')) return
   const dataUrl = await fileToDataUrl(file)
-  const id = await hashDataUrl(dataUrl)
+  const id = await storeImage(dataUrl, 'upload')
   await addImageToCanvas(dataUrl, file.name.replace(/\.[^.]+$/, ''))
   imageCache.set(id, dataUrl)
   useStore.getState().addInputImage({ id, dataUrl })
@@ -1043,7 +1322,7 @@ export async function addImageFromUrl(src: string): Promise<void> {
   const blob = await res.blob()
   if (!blob.type.startsWith('image/')) throw new Error('不是有效的图片')
   const dataUrl = await blobToDataUrl(blob)
-  const id = await hashDataUrl(dataUrl)
+  const id = await storeImage(dataUrl, 'upload')
   await addImageToCanvas(dataUrl)
   imageCache.set(id, dataUrl)
   useStore.getState().addInputImage({ id, dataUrl })

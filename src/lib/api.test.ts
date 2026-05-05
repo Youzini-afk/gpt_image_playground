@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { DEFAULT_PARAMS, DEFAULT_SETTINGS } from '../types'
+import { DEFAULT_PARAMS } from '../types'
+import { DEFAULT_SETTINGS } from './apiProfiles'
 import { callImageApi } from './api'
 
 describe('callImageApi', () => {

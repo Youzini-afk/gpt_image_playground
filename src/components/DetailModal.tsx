@@ -40,10 +40,11 @@ export default function DetailModal() {
   }, [detailTaskId])
 
   useEffect(() => {
-    if (task?.status !== 'running') return
+    if (task?.status !== 'running' && !(task?.status === 'error' && task.falRecoverable)) return
     const id = window.setInterval(() => setNow(Date.now()), 1000)
+    setNow(Date.now())
     return () => window.clearInterval(id)
-  }, [task?.status])
+  }, [task?.falRecoverable, task?.status])
 
   // 加载所有相关图片
   useEffect(() => {
@@ -163,6 +164,12 @@ export default function DetailModal() {
   const hasHandledPromptWarning = settings.codexCli || dismissedCodexCliPrompts.includes(codexCliPromptKey)
   const showPromptWarning = Boolean(currentOutputImageId && (!currentRevisedPrompt || showRevisedPrompt) && !hasHandledPromptWarning)
   const aggregateActualParams = outputLen > 0 ? { ...task.actualParams, n: outputLen } : task.actualParams
+  const taskProvider = task.apiProvider
+  const taskProviderName = taskProvider === 'fal' ? 'fal.ai' : taskProvider ? 'OpenAI' : '未知'
+  const taskProfileName = task.apiProfileName || '未知'
+  const taskModel = task.apiModel || '未知'
+  const showSourceInfo = Boolean(task.apiProvider || task.apiProfileName || task.apiModel)
+  const isFalReconnecting = task.status === 'error' && task.falRecoverable
 
   const formatTime = (ts: number | null) => {
     if (!ts) return ''
@@ -170,7 +177,7 @@ export default function DetailModal() {
   }
 
   const formatDuration = () => {
-    if (task.status === 'running') {
+    if (task.status === 'running' || isFalReconnecting) {
       const seconds = Math.max(0, Math.floor((now - task.createdAt) / 1000))
       const mm = String(Math.floor(seconds / 60)).padStart(2, '0')
       const ss = String(seconds % 60).padStart(2, '0')
@@ -294,7 +301,7 @@ export default function DetailModal() {
 
         {/* 左侧：图片 */}
         <div ref={imagePanelRef} className="md:w-1/2 w-full h-64 md:h-auto bg-gray-100 dark:bg-black/20 relative flex items-center justify-center flex-shrink-0 min-h-[16rem]">
-          {task.status === 'done' && outputLen > 0 && (
+          {task.status === 'done' && outputLen > 0 && currentOutputImageSrc && (
             <>
               <img
                 ref={mainImageRef}
@@ -366,7 +373,7 @@ export default function DetailModal() {
               )}
             </>
           )}
-          {task.status === 'running' && (
+          {(task.status === 'running' || isFalReconnecting) && (
             <>
               <div className="absolute left-4 top-4 flex items-center gap-1 bg-black/50 text-white text-xs px-2 py-0.5 rounded backdrop-blur-sm font-mono">
                 <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -374,13 +381,23 @@ export default function DetailModal() {
                 </svg>
                 {formatDuration()}
               </div>
-              <svg className="w-10 h-10 text-blue-400 animate-spin" fill="none" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-              </svg>
+              {task.status === 'running' && (
+                <svg className="w-10 h-10 text-blue-400 animate-spin" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                </svg>
+              )}
             </>
           )}
-          {task.status === 'error' && (
+          {task.status === 'error' && isFalReconnecting && (
+            <div className="w-full max-w-md px-4 text-center">
+              <svg className="w-10 h-10 text-yellow-400 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              <p className="text-sm font-medium text-yellow-500">重连中</p>
+            </div>
+          )}
+          {task.status === 'error' && !isFalReconnecting && (
             <div className="w-full max-w-md px-4 text-center">
               <svg className="w-10 h-10 text-red-400 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -465,11 +482,13 @@ export default function DetailModal() {
                           }`}
                           onClick={() => setLightboxImageId(imgId, allInputImageIds)}
                         >
-                          <img
-                            src={displaySrc}
-                            className="w-full h-full object-cover"
-                            alt=""
-                          />
+                          {displaySrc && (
+                            <img
+                              src={displaySrc}
+                              className="w-full h-full object-cover"
+                              alt=""
+                            />
+                          )}
                           {isMaskTarget && (
                             <span className="absolute left-1 top-1 rounded bg-blue-500/90 px-1.5 py-0.5 text-[8px] leading-none text-white font-bold tracking-wider backdrop-blur-sm z-10 pointer-events-none">
                               MASK
@@ -487,6 +506,14 @@ export default function DetailModal() {
             <h3 className="text-xs font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wider mb-2">
               参数配置
             </h3>
+            {showSourceInfo && (
+              <div className="mb-2 rounded-lg bg-gray-50 px-3 py-2 text-xs dark:bg-white/[0.03]">
+                <span className="text-gray-400 dark:text-gray-500">来源</span>
+                <br />
+                <span className="font-medium text-gray-700 dark:text-gray-200">{taskProviderName}</span>
+                <span className="text-gray-400 dark:text-gray-500"> · {taskProfileName} · {taskModel}</span>
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-2 text-xs mb-4">
               <div className="bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2">
                 <span className="text-gray-400 dark:text-gray-500">尺寸</span>

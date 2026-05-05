@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { DEFAULT_PARAMS, DEFAULT_SETTINGS } from './types'
+import { DEFAULT_PARAMS } from './types'
+import { DEFAULT_SETTINGS } from './lib/apiProfiles'
 import type { TaskRecord } from './types'
-import { editOutputs, submitTask, useStore } from './store'
+import { editOutputs, markInterruptedOpenAIRunningTasks, submitTask, useStore } from './store'
 
 const imageA = { id: 'image-a', dataUrl: 'data:image/png;base64,a' }
 
@@ -91,5 +92,33 @@ describe('mask draft lifecycle in store actions', () => {
     await submitTask()
 
     expect(useStore.getState().maskDraft).toBeNull()
+  })
+})
+
+describe('interrupted OpenAI running tasks', () => {
+  it('marks legacy and OpenAI running tasks as interrupted', () => {
+    const now = 10_000
+    const legacyRunning = task({ id: 'legacy-running', status: 'running', createdAt: 1_000, finishedAt: null, elapsed: null })
+    const openAIRunning = task({ id: 'openai-running', apiProvider: 'openai', status: 'running', createdAt: 2_000, finishedAt: null, elapsed: null })
+    const falRunning = task({ id: 'fal-running', apiProvider: 'fal', status: 'running', createdAt: 3_000, finishedAt: null, elapsed: null })
+    const doneTask = task({ id: 'done-task', apiProvider: 'openai', status: 'done' })
+
+    const result = markInterruptedOpenAIRunningTasks([legacyRunning, openAIRunning, falRunning, doneTask], now)
+
+    expect(result.interruptedTasks.map((item) => item.id)).toEqual(['legacy-running', 'openai-running'])
+    expect(result.tasks.find((item) => item.id === 'legacy-running')).toMatchObject({
+      status: 'error',
+      error: expect.stringContaining('请求中断'),
+      finishedAt: now,
+      elapsed: 9_000,
+    })
+    expect(result.tasks.find((item) => item.id === 'openai-running')).toMatchObject({
+      status: 'error',
+      error: expect.stringContaining('请求中断'),
+      finishedAt: now,
+      elapsed: 8_000,
+    })
+    expect(result.tasks.find((item) => item.id === 'fal-running')).toEqual(falRunning)
+    expect(result.tasks.find((item) => item.id === 'done-task')).toEqual(doneTask)
   })
 })
