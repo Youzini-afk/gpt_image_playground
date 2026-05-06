@@ -2,7 +2,39 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_PARAMS } from './types'
 import { DEFAULT_SETTINGS } from './lib/apiProfiles'
 import type { TaskRecord } from './types'
-import { editOutputs, markInterruptedOpenAIRunningTasks, submitTask, useStore } from './store'
+
+const storageMock = vi.hoisted(() => {
+  const adapter = {
+    getAllTasks: vi.fn(),
+    putTask: vi.fn(),
+    deleteTask: vi.fn(),
+    clearTasks: vi.fn(),
+    getImage: vi.fn(),
+    getAllImages: vi.fn(),
+    putImage: vi.fn(),
+    deleteImage: vi.fn(),
+    clearImages: vi.fn(),
+    getAllCanvasImages: vi.fn(),
+    putCanvasImage: vi.fn(),
+    deleteCanvasImage: vi.fn(),
+    clearCanvasImages: vi.fn(),
+  }
+
+  return {
+    adapter,
+    getStorage: vi.fn(() => adapter),
+    setStorageMode: vi.fn(),
+    testServerStorage: vi.fn(),
+  }
+})
+
+vi.mock('./lib/storage', () => ({
+  getStorage: storageMock.getStorage,
+  setStorageMode: storageMock.setStorageMode,
+  testServerStorage: storageMock.testServerStorage,
+}))
+
+import { editOutputs, ensureImageCached, initStore, markInterruptedOpenAIRunningTasks, submitTask, useStore } from './store'
 
 const imageA = { id: 'image-a', dataUrl: 'data:image/png;base64,a' }
 
@@ -44,6 +76,15 @@ describe('mask draft lifecycle in store actions', () => {
       showToast: vi.fn(),
       setConfirmDialog: vi.fn(),
     })
+    for (const mock of Object.values(storageMock.adapter)) mock.mockReset()
+    storageMock.getStorage.mockClear()
+    storageMock.adapter.getAllTasks.mockResolvedValue([])
+    storageMock.adapter.getAllCanvasImages.mockResolvedValue([])
+    storageMock.adapter.getAllImages.mockResolvedValue([])
+    storageMock.adapter.getImage.mockResolvedValue(undefined)
+    storageMock.adapter.putTask.mockResolvedValue(undefined)
+    storageMock.adapter.putImage.mockResolvedValue(undefined)
+    storageMock.adapter.deleteImage.mockResolvedValue(undefined)
   })
 
   it('preserves an existing mask when quick edit-output adds outputs as references', async () => {
@@ -92,6 +133,33 @@ describe('mask draft lifecycle in store actions', () => {
     await submitTask()
 
     expect(useStore.getState().maskDraft).toBeNull()
+  })
+
+  it('initializes task metadata without eagerly loading every stored image', async () => {
+    storageMock.adapter.getAllTasks.mockResolvedValue([
+      task({ id: 'task-with-image', outputImages: ['image-a'] }),
+    ])
+
+    await initStore()
+
+    expect(useStore.getState().tasks.map((item) => item.id)).toEqual(['task-with-image'])
+    expect(storageMock.adapter.getAllImages).not.toHaveBeenCalled()
+  })
+
+  it('reuses an in-flight image load for concurrent cache misses', async () => {
+    storageMock.adapter.getImage.mockResolvedValue({
+      id: 'image-a',
+      dataUrl: imageA.dataUrl,
+    })
+
+    const [first, second] = await Promise.all([
+      ensureImageCached('image-a'),
+      ensureImageCached('image-a'),
+    ])
+
+    expect(first).toBe(imageA.dataUrl)
+    expect(second).toBe(imageA.dataUrl)
+    expect(storageMock.adapter.getImage).toHaveBeenCalledTimes(1)
   })
 })
 

@@ -25,6 +25,7 @@ import { zipSync, unzipSync, strToU8, strFromU8 } from 'fflate'
 // 内存缓存，id → dataUrl，避免每次从 IndexedDB 读取
 
 const imageCache = new Map<string, string>()
+const imageLoadPromises = new Map<string, Promise<string | undefined>>()
 const persistedImageIds = new Set<string>()
 const FAL_RECOVERY_POLL_MS = 10_000
 const falRecoveryTimers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -71,6 +72,7 @@ async function deleteImage(id: string) {
 
 async function clearImages() {
   await getStorage().clearImages()
+  imageLoadPromises.clear()
   persistedImageIds.clear()
 }
 
@@ -89,12 +91,23 @@ export function getCachedImage(id: string): string | undefined {
 
 export async function ensureImageCached(id: string): Promise<string | undefined> {
   if (imageCache.has(id)) return imageCache.get(id)
-  const rec = await getImage(id)
-  if (rec) {
-    imageCache.set(id, rec.dataUrl)
-    return rec.dataUrl
-  }
-  return undefined
+  const existingLoad = imageLoadPromises.get(id)
+  if (existingLoad) return existingLoad
+
+  const load = getImage(id)
+    .then((rec) => {
+      if (rec) {
+        imageCache.set(id, rec.dataUrl)
+        persistedImageIds.add(rec.id)
+        return rec.dataUrl
+      }
+      return undefined
+    })
+    .finally(() => {
+      imageLoadPromises.delete(id)
+    })
+  imageLoadPromises.set(id, load)
+  return load
 }
 
 function orderImagesWithMaskFirst(images: InputImage[], maskTargetImageId: string | null | undefined) {
@@ -414,6 +427,7 @@ export async function initStorageMode() {
 export async function switchStorageMode(mode: 'local' | 'server') {
   setStorageMode(mode)
   imageCache.clear()
+  imageLoadPromises.clear()
   persistedImageIds.clear()
   await initStore()
 }
@@ -615,7 +629,7 @@ async function recoverFalTask(taskId: string) {
   }
 }
 
-/** 初始化：从当前存储加载任务、画布和图片缓存，清理孤立图片 */
+/** 初始化：只加载任务和画布元数据；图片按需进入缓存。 */
 export async function initStore() {
   const storedTasks = await getAllTasks()
   const { tasks, interruptedTasks } = markInterruptedOpenAIRunningTasks(storedTasks)
@@ -635,41 +649,17 @@ export async function initStore() {
   const canvasImages = await getStorage().getAllCanvasImages()
   useStore.getState().setCanvasImages(canvasImages)
 
-  // 收集所有任务引用的图片 id
-  const referencedIds = new Set<string>()
   const state = useStore.getState()
   const persistedInputImages = state.inputImages.length
     ? state.inputImages
     : state.inputImageIds.map((id) => ({ id, dataUrl: '' }))
-  for (const img of persistedInputImages) referencedIds.add(img.id)
-  for (const t of tasks) {
-    for (const id of t.inputImageIds || []) referencedIds.add(id)
-    if (t.maskImageId) referencedIds.add(t.maskImageId)
-    for (const id of t.outputImages || []) {
-      referencedIds.add(id)
-    }
-  }
-  for (const canvasImage of canvasImages) {
-    referencedIds.add(canvasImage.imageId)
-  }
-  if (state.maskDraft?.targetImageId) {
-    referencedIds.add(state.maskDraft.targetImageId)
-  }
 
-  // 预加载所有图片到缓存，同时清理孤立图片
-  const images = await getAllImages()
-  const imageById = new Map(images.map((img) => [img.id, img]))
-  for (const img of images) {
-    if (referencedIds.has(img.id)) {
-      imageCache.set(img.id, img.dataUrl)
-      persistedImageIds.add(img.id)
-    } else {
-      await deleteImage(img.id)
-    }
-  }
-  const restoredInputImages = persistedInputImages
-    .map((img) => ({ ...img, dataUrl: img.dataUrl || imageById.get(img.id)?.dataUrl || '' }))
-    .filter((img) => img.dataUrl)
+  const restoredInputImages = (await Promise.all(
+    persistedInputImages.map(async (img) => {
+      const dataUrl = img.dataUrl || await ensureImageCached(img.id)
+      return dataUrl ? { ...img, dataUrl } : null
+    }),
+  )).filter((img): img is InputImage => Boolean(img))
   if (restoredInputImages.length !== persistedInputImages.length || restoredInputImages.some((img, index) => img.dataUrl !== persistedInputImages[index]?.dataUrl)) {
     useStore.getState().setInputImages(restoredInputImages)
   }

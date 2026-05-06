@@ -34,6 +34,8 @@ export default function TaskCard({
   const swipeResetTimerRef = useRef<number | null>(null)
   const suppressClickUntilRef = useRef(0)
   const horizontalSwipeRef = useRef(false)
+  const cardRef = useRef<HTMLDivElement>(null)
+  const [shouldLoadThumb, setShouldLoadThumb] = useState(false)
 
   const handleTouchStart = (e: React.TouchEvent) => {
     if (swipeResetTimerRef.current != null) {
@@ -101,6 +103,27 @@ export default function TaskCard({
     }
   }, [])
 
+  useEffect(() => {
+    if (shouldLoadThumb) return
+    const element = cardRef.current
+    if (!element) return
+
+    if (typeof IntersectionObserver === 'undefined') {
+      setShouldLoadThumb(true)
+      return
+    }
+
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        setShouldLoadThumb(true)
+        observer.disconnect()
+      }
+    }, { rootMargin: '800px 0px' })
+
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [shouldLoadThumb])
+
   // 定时更新运行中任务的计时
   useEffect(() => {
     if (task.status !== 'running' && !(task.status === 'error' && task.falRecoverable)) return
@@ -109,22 +132,32 @@ export default function TaskCard({
     return () => clearInterval(id)
   }, [task.falRecoverable, task.status])
 
+  const thumbImageId = task.outputImages?.[0] || ''
+
   // 加载缩略图
   useEffect(() => {
+    let cancelled = false
     setCoverRatio('')
     setCoverSize('')
+    setThumbSrc('')
 
-    if (task.outputImages?.[0]) {
-      const cached = getCachedImage(task.outputImages[0])
+    if (!shouldLoadThumb) return
+
+    if (thumbImageId) {
+      const cached = getCachedImage(thumbImageId)
       if (cached) {
         setThumbSrc(cached)
       } else {
-        ensureImageCached(task.outputImages[0]).then((url) => {
-          if (url) setThumbSrc(url)
+        ensureImageCached(thumbImageId).then((url) => {
+          if (!cancelled && url) setThumbSrc(url)
         })
       }
     }
-  }, [task.outputImages])
+
+    return () => {
+      cancelled = true
+    }
+  }, [shouldLoadThumb, thumbImageId])
 
   useEffect(() => {
     if (!thumbSrc) return
@@ -175,7 +208,7 @@ export default function TaskCard({
     : 'bg-gray-200 dark:bg-gray-700'
 
   return (
-    <div className="relative rounded-xl">
+    <div ref={cardRef} className="relative rounded-xl">
       {/* 侧滑底图 */}
       <div
         className={`absolute inset-0 rounded-xl flex items-center transition-opacity duration-200 pointer-events-none ${

@@ -18,8 +18,11 @@ export default function Lightbox() {
   const tasks = useStore((s) => s.tasks)
 
   const [src, setSrc] = useState('')
+  const [srcImageId, setSrcImageId] = useState('')
   const [maskImageSrc, setMaskImageSrc] = useState('')
   const [maskPreviewSrc, setMaskPreviewSrc] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [loadFailed, setLoadFailed] = useState(false)
 
   const close = useCallback(() => setLightboxImageId(null), [setLightboxImageId])
   useCloseOnEscape(Boolean(lightboxImageId), close)
@@ -28,25 +31,56 @@ export default function Lightbox() {
   useEffect(() => {
     if (!lightboxImageId) {
       setSrc('')
+      setSrcImageId('')
+      setLoading(false)
+      setLoadFailed(false)
       return
     }
+    let cancelled = false
     const cached = getCachedImage(lightboxImageId)
     if (cached) {
       setSrc(cached)
+      setSrcImageId(lightboxImageId)
+      setLoading(false)
+      setLoadFailed(false)
     } else {
-      ensureImageCached(lightboxImageId).then((url) => {
-        if (url) setSrc(url)
-      })
+      setSrc('')
+      setSrcImageId('')
+      setLoading(true)
+      setLoadFailed(false)
+      ensureImageCached(lightboxImageId)
+        .then((url) => {
+          if (cancelled) return
+          if (url) {
+            setSrc(url)
+            setSrcImageId(lightboxImageId)
+            setLoadFailed(false)
+          } else {
+            setLoadFailed(true)
+          }
+        })
+        .catch(() => {
+          if (!cancelled) setLoadFailed(true)
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false)
+        })
+    }
+
+    return () => {
+      cancelled = true
     }
   }, [lightboxImageId])
 
   // 遮罩图加载
   useEffect(() => {
+    let cancelled = false
     if (!lightboxImageId) {
       setMaskImageSrc('')
       return
     }
 
+    setMaskImageSrc('')
     if (maskDraft?.targetImageId === lightboxImageId) {
       setMaskImageSrc(maskDraft.maskDataUrl)
       return
@@ -59,11 +93,15 @@ export default function Lightbox() {
         setMaskImageSrc(cached)
       } else {
         ensureImageCached(taskWithMask.maskImageId).then((url) => {
-          if (url) setMaskImageSrc(url)
+          if (!cancelled && url) setMaskImageSrc(url)
         })
       }
     } else {
       setMaskImageSrc('')
+    }
+
+    return () => {
+      cancelled = true
     }
   }, [lightboxImageId, maskDraft?.targetImageId, maskDraft?.maskDataUrl, tasks])
 
@@ -92,6 +130,7 @@ export default function Lightbox() {
   const currentIndex = lightboxImageId ? lightboxImageList.indexOf(lightboxImageId) : -1
   const total = lightboxImageList.length
   const showNav = total > 1
+  const visibleSrc = srcImageId === lightboxImageId ? src : ''
 
   const goTo = useCallback((idx: number) => {
     if (lightboxImageList.length === 0) return
@@ -113,11 +152,21 @@ export default function Lightbox() {
     return () => window.removeEventListener('keydown', onKey)
   }, [lightboxImageId, showNav, goPrev, goNext])
 
-  if (!lightboxImageId || !src) return null
+  if (!lightboxImageId) return null
+
+  if (!visibleSrc) {
+    return (
+      <LightboxPlaceholder
+        loading={loading}
+        loadFailed={loadFailed}
+        onClose={close}
+      />
+    )
+  }
 
   return (
     <LightboxInner
-      src={src}
+      src={visibleSrc}
       maskPreviewSrc={maskPreviewSrc}
       onClose={close}
       showNav={showNav}
@@ -126,6 +175,27 @@ export default function Lightbox() {
       onPrev={goPrev}
       onNext={goNext}
     />
+  )
+}
+
+function LightboxPlaceholder({ loading, loadFailed, onClose }: { loading: boolean; loadFailed: boolean; onClose: () => void }) {
+  return (
+    <div
+      data-lightbox-root
+      className="fixed inset-0 z-[60] flex items-center justify-center select-none cursor-pointer"
+      onClick={onClose}
+    >
+      <div className="absolute inset-0 bg-black/70 backdrop-blur-md animate-fade-in" />
+      <div className="relative flex flex-col items-center gap-3 text-white/80">
+        {loading && (
+          <svg className="h-8 w-8 animate-spin text-white/70" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+          </svg>
+        )}
+        <span className="text-sm">{loadFailed ? '图片加载失败' : '加载图片...'}</span>
+      </div>
+    </div>
   )
 }
 

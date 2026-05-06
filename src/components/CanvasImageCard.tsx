@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import type { CanvasImage } from '../types'
 import { useStore, getCachedImage, ensureImageCached, removeCanvasImage, addCanvasImageToInput } from '../store'
 import { copyBlobToClipboard, getClipboardFailureMessage } from '../lib/clipboard'
@@ -9,17 +9,48 @@ export default function CanvasImageCard({ canvasImage }: { canvasImage: CanvasIm
   const setLightboxImageId = useStore((s) => s.setLightboxImageId)
   const inputImages = useStore((s) => s.inputImages)
   const [menuOpen, setMenuOpen] = useState(false)
+  const cardRef = useRef<HTMLDivElement>(null)
+  const [shouldLoadThumb, setShouldLoadThumb] = useState(false)
 
   useEffect(() => {
+    if (shouldLoadThumb) return
+    const element = cardRef.current
+    if (!element) return
+
+    if (typeof IntersectionObserver === 'undefined') {
+      setShouldLoadThumb(true)
+      return
+    }
+
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        setShouldLoadThumb(true)
+        observer.disconnect()
+      }
+    }, { rootMargin: '800px 0px' })
+
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [shouldLoadThumb])
+
+  useEffect(() => {
+    let cancelled = false
+    setThumbSrc('')
+    if (!shouldLoadThumb) return
+
     const cached = getCachedImage(canvasImage.imageId)
     if (cached) {
       setThumbSrc(cached)
     } else {
       ensureImageCached(canvasImage.imageId).then((url) => {
-        if (url) setThumbSrc(url)
+        if (!cancelled && url) setThumbSrc(url)
       })
     }
-  }, [canvasImage.imageId])
+
+    return () => {
+      cancelled = true
+    }
+  }, [canvasImage.imageId, shouldLoadThumb])
 
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault()
@@ -73,7 +104,7 @@ export default function CanvasImageCard({ canvasImage }: { canvasImage: CanvasIm
   const isInInput = inputImages.some((i) => i.id === canvasImage.imageId)
 
   return (
-    <div className="relative rounded-xl" onContextMenu={handleContextMenu}>
+    <div ref={cardRef} className="relative rounded-xl" onContextMenu={handleContextMenu}>
       <div className="relative bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-white/[0.08] overflow-hidden cursor-pointer hover:shadow-lg dark:hover:bg-gray-800/80 transition-[box-shadow,border-color,background-color]">
         <div className="w-full aspect-square bg-gray-100 dark:bg-black/20 relative flex items-center justify-center overflow-hidden">
           {thumbSrc ? (
