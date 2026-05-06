@@ -22,4 +22,10 @@ describe('Docker API proxy configuration', () => {
     expect(dockerfile).toContain('deploy/migrate-api-env.envsh')
     expect(dockerfile).toContain('40-inject-api-url.sh node dist-server/index.js')
   })
+
+  it('runtime injection treats the legacy API_PROXY flag as proxy availability', () => {
+    const injectScript = readFileSync(resolve(rootDir, 'deploy/inject-api-url.sh'), 'utf-8')
+
+    expect(injectScript).toContain('[ "$ENABLE_API_PROXY" = "true" ] || [ "$API_PROXY" = "true" ]')
+  })
 })

@@ -8,7 +8,7 @@ if [ -n "$API_URL" ]; then
 fi
 
 API_PROXY_AVAILABLE=false
-if [ "$ENABLE_API_PROXY" = "true" ]; then
+if [ "$ENABLE_API_PROXY" = "true" ] || [ "$API_PROXY" = "true" ]; then
     API_PROXY_AVAILABLE=true
 fi
 
