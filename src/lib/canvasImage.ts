@@ -10,6 +10,7 @@ export async function loadImage(dataUrl: string): Promise<HTMLImageElement> {
     const image = new Image()
     image.onload = () => resolve(image)
     image.onerror = () => reject(new Error('图片加载失败'))
+    image.decoding = 'async'
     image.src = dataUrl
   })
 }
