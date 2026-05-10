@@ -7,6 +7,7 @@ import { DEFAULT_FAL_IMAGE_SIZE, getChangedParams, getOutputImageLimitForSetting
 import { normalizeImageSize } from '../lib/size'
 import { createMaskPreviewDataUrl } from '../lib/canvasImage'
 import { dismissAllTooltips } from '../lib/tooltipDismiss'
+import { getFilteredTasks } from '../lib/tasks'
 import Select from './Select'
 import SizePickerModal from './SizePickerModal'
 import ViewportTooltip from './ViewportTooltip'
@@ -56,28 +57,22 @@ export default function InputBar() {
   const searchQuery = useStore((s) => s.searchQuery)
 
   const filteredTasks = useMemo(() => {
-    const sorted = [...tasks].sort((a, b) => b.createdAt - a.createdAt)
-    const q = searchQuery.trim().toLowerCase()
-    
-    return sorted.filter((t) => {
-      if (filterFavorite && !t.isFavorite) return false
-      const matchStatus = filterStatus === 'all' || t.status === filterStatus
-      if (!matchStatus) return false
-      
-      if (!q) return true
-      const prompt = (t.prompt || '').toLowerCase()
-      const paramStr = JSON.stringify(t.params).toLowerCase()
-      return prompt.includes(q) || paramStr.includes(q)
-    })
+    return getFilteredTasks(tasks, searchQuery, filterStatus, filterFavorite)
   }, [tasks, searchQuery, filterStatus, filterFavorite])
+  const filteredTaskIds = useMemo(() => filteredTasks.map((task) => task.id), [filteredTasks])
+  const filteredTaskIdSet = useMemo(() => new Set(filteredTaskIds), [filteredTaskIds])
+  const selectedFilteredTaskCount = useMemo(() => {
+    return selectedTaskIds.filter((id) => filteredTaskIdSet.has(id)).length
+  }, [selectedTaskIds, filteredTaskIdSet])
+  const allFilteredTasksSelected = filteredTaskIds.length > 0 && selectedFilteredTaskCount === filteredTaskIds.length
 
   const handleSelectAllToggle = useCallback(() => {
-    if (selectedTaskIds.length === filteredTasks.length && filteredTasks.length > 0) {
+    if (allFilteredTasksSelected) {
       clearSelection()
     } else {
-      setSelectedTaskIds(filteredTasks.map((t) => t.id))
+      setSelectedTaskIds(filteredTaskIds)
     }
-  }, [selectedTaskIds.length, filteredTasks, clearSelection, setSelectedTaskIds])
+  }, [allFilteredTasksSelected, filteredTaskIds, clearSelection, setSelectedTaskIds])
 
   const handleToggleFavorite = useCallback(() => {
     const selectedTasks = tasks.filter((t) => selectedTaskIds.includes(t.id))
@@ -160,7 +155,6 @@ export default function InputBar() {
   }, [tasks, selectedTaskIds, showToast, clearSelection])
 
   const maskDraft = useStore((s) => s.maskDraft)
-  const clearMaskDraft = useStore((s) => s.clearMaskDraft)
   const setMaskEditorImageId = useStore((s) => s.setMaskEditorImageId)
   const moveInputImage = useStore((s) => s.moveInputImage)
 
@@ -912,6 +906,7 @@ export default function InputBar() {
             <img
               src={displaySrc}
               className="w-full h-full object-cover hover:opacity-90 transition-opacity pointer-events-none"
+              decoding="async"
               alt=""
             />
           )}
@@ -985,7 +980,7 @@ export default function InputBar() {
             className="fixed z-[140] h-[52px] w-[52px] overflow-hidden rounded-xl shadow-xl pointer-events-none opacity-90"
             style={{ left: touchDragPreview.x, top: touchDragPreview.y, transform: 'translate(-50%, -50%)' }}
           >
-            <img src={touchDragPreview.src} className="h-full w-full object-cover" alt="" />
+            <img src={touchDragPreview.src} className="h-full w-full object-cover" decoding="async" alt="" />
           </div>,
           document.body,
         )}
@@ -1208,9 +1203,9 @@ export default function InputBar() {
               <button
                 onClick={handleSelectAllToggle}
                 className="p-2 text-blue-500 dark:text-blue-400 hover:text-blue-600 dark:hover:text-blue-300 transition-colors"
-                title={selectedTaskIds.length === filteredTasks.length && filteredTasks.length > 0 ? "取消全选" : "全选当前可见"}
+                title={allFilteredTasksSelected ? "取消全选筛选结果" : `全选当前筛选结果（${filteredTaskIds.length} 条）`}
               >
-                {selectedTaskIds.length === filteredTasks.length && filteredTasks.length > 0 ? (
+                {allFilteredTasksSelected ? (
                   <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
                     <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
                     <path d="M9 12l2 2 4-4" />
