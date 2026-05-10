@@ -38,6 +38,13 @@ export class FileStorage {
         created_at INTEGER NOT NULL DEFAULT 0
       );
 
+      CREATE TABLE IF NOT EXISTS image_thumbnails (
+        id TEXT PRIMARY KEY,
+        data_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL DEFAULT 0,
+        FOREIGN KEY(id) REFERENCES images(id) ON DELETE CASCADE
+      );
+
       CREATE TABLE IF NOT EXISTS canvas_images (
         id TEXT PRIMARY KEY,
         data_json TEXT NOT NULL,
@@ -46,6 +53,7 @@ export class FileStorage {
 
       CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_images_created_at ON images(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_image_thumbnails_created_at ON image_thumbnails(created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_canvas_created_at ON canvas_images(created_at DESC);
     `)
   }
@@ -139,6 +147,23 @@ export class FileStorage {
     return rows.map((row) => JSON.parse(row.data_json) as Image)
   }
 
+  getAllImageMetadata<Image extends { dataUrl?: string }>(): Omit<Image, 'dataUrl'>[] {
+    const rows = this.db
+      .prepare('SELECT data_json FROM images ORDER BY created_at DESC, rowid DESC')
+      .all() as Array<{ data_json: string }>
+    return rows.map((row) => {
+      const { dataUrl: _dataUrl, ...metadata } = JSON.parse(row.data_json) as Image
+      return metadata
+    })
+  }
+
+  getAllImageIds(): string[] {
+    const rows = this.db
+      .prepare('SELECT id FROM images ORDER BY created_at DESC, rowid DESC')
+      .all() as Array<{ id: string }>
+    return rows.map((row) => row.id)
+  }
+
   getImage<Image>(id: string): Image | undefined {
     const row = this.db.prepare('SELECT data_json FROM images WHERE id = ?').get(id) as { data_json: string } | undefined
     return row ? (JSON.parse(row.data_json) as Image) : undefined
@@ -161,17 +186,50 @@ export class FileStorage {
   }
 
   deleteImage(id: string): void {
-    this.db.prepare('DELETE FROM images WHERE id = ?').run(id)
+    const remove = this.db.transaction(() => {
+      this.db.prepare('DELETE FROM image_thumbnails WHERE id = ?').run(id)
+      this.db.prepare('DELETE FROM images WHERE id = ?').run(id)
+    })
+    remove()
     const legacyFile = join(this.imagesDir, `${id}.json`)
     if (existsSync(legacyFile)) unlinkSync(legacyFile)
   }
 
   clearImages(): void {
-    this.db.prepare('DELETE FROM images').run()
+    const clear = this.db.transaction(() => {
+      this.db.prepare('DELETE FROM image_thumbnails').run()
+      this.db.prepare('DELETE FROM images').run()
+    })
+    clear()
     if (existsSync(this.imagesDir)) {
       const files = readdirSync(this.imagesDir).filter((f) => f.endsWith('.json'))
       for (const f of files) unlinkSync(join(this.imagesDir, f))
     }
+  }
+
+  getImageThumbnail<Thumbnail>(id: string): Thumbnail | undefined {
+    const row = this.db.prepare('SELECT data_json FROM image_thumbnails WHERE id = ?').get(id) as { data_json: string } | undefined
+    return row ? (JSON.parse(row.data_json) as Thumbnail) : undefined
+  }
+
+  putImageThumbnail<Thumbnail extends { id: string }>(thumbnail: Thumbnail): void {
+    this.db
+      .prepare(`
+        INSERT INTO image_thumbnails (id, data_json, created_at)
+        VALUES (@id, @data_json, @created_at)
+        ON CONFLICT(id) DO UPDATE SET
+          data_json = excluded.data_json,
+          created_at = excluded.created_at
+      `)
+      .run({
+        id: thumbnail.id,
+        data_json: JSON.stringify(thumbnail),
+        created_at: Date.now(),
+      })
+  }
+
+  deleteImageThumbnail(id: string): void {
+    this.db.prepare('DELETE FROM image_thumbnails WHERE id = ?').run(id)
   }
 
   // ===== Canvas Images =====
