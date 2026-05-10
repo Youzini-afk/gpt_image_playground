@@ -9,6 +9,7 @@ import type {
   TaskRecord,
   ExportData,
   StoredImage,
+  StoredImageThumbnail,
   CanvasImage,
 } from './types'
 import { DEFAULT_PARAMS } from './types'
@@ -16,9 +17,6 @@ import { DEFAULT_SETTINGS, getActiveApiProfile, getCustomProviderDefinition, mer
 import { dismissAllTooltips } from './lib/tooltipDismiss'
 import {
   CURRENT_THUMBNAIL_VERSION,
-  getImageThumbnail as dbGetImageThumbnail,
-  getStoredFreshImageThumbnail,
-  putImageThumbnail,
   hashDataUrl,
 } from './lib/db'
 import { getStorage, setStorageMode, testServerStorage } from './lib/storage'
@@ -45,6 +43,7 @@ let thumbnailBackfillScheduled = false
 const MAX_IMAGE_CACHE_ENTRIES = 8
 const MAX_THUMBNAIL_CACHE_ENTRIES = 80
 const MAX_THUMBNAIL_BACKFILL_CONCURRENT = 4
+const INITIAL_THUMBNAIL_BACKFILL_LIMIT = 12
 const FAL_RECOVERY_POLL_MS = 10_000
 const CUSTOM_RECOVERY_POLL_MS = 10_000
 const falRecoveryTimers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -81,11 +80,45 @@ async function getAllImages() {
 }
 
 async function getAllImageIds() {
-  return (await getAllImages()).map((image) => image.id)
+  return getStorage().getAllImageIds()
 }
 
 async function getImageThumbnail(id: string) {
-  return dbGetImageThumbnail(id)
+  const existingThumbnail = await getStorage().getStoredFreshImageThumbnail(id)
+  if (existingThumbnail?.thumbnailDataUrl) return existingThumbnail
+
+  const image = await getImage(id)
+  if (!image) return undefined
+  const legacyImage = image as StoredImage & Partial<StoredImageThumbnail>
+  if (legacyImage.thumbnailDataUrl && legacyImage.thumbnailVersion === CURRENT_THUMBNAIL_VERSION) {
+    const thumbnail: StoredImageThumbnail = {
+      id,
+      thumbnailDataUrl: legacyImage.thumbnailDataUrl,
+      width: legacyImage.width,
+      height: legacyImage.height,
+      thumbnailVersion: CURRENT_THUMBNAIL_VERSION,
+    }
+    await getStorage().putImageThumbnail(thumbnail)
+    if ((!image.width || !image.height) && thumbnail.width && thumbnail.height) {
+      await putImage({ ...image, width: thumbnail.width, height: thumbnail.height })
+    }
+    return thumbnail
+  }
+
+  const metadata = await safeCreateImageThumbnail(image.dataUrl)
+  if (!metadata.thumbnailDataUrl) return undefined
+  const thumbnail: StoredImageThumbnail = {
+    id,
+    thumbnailDataUrl: metadata.thumbnailDataUrl,
+    width: metadata.width,
+    height: metadata.height,
+    thumbnailVersion: CURRENT_THUMBNAIL_VERSION,
+  }
+  await getStorage().putImageThumbnail(thumbnail)
+  if (metadata.width && metadata.height && (image.width !== metadata.width || image.height !== metadata.height)) {
+    await putImage({ ...image, width: metadata.width, height: metadata.height })
+  }
+  return thumbnail
 }
 
 async function putImage(image: StoredImage) {
@@ -96,6 +129,8 @@ async function putImage(image: StoredImage) {
 async function deleteImage(id: string) {
   await getStorage().deleteImage(id)
   persistedImageIds.delete(id)
+  thumbnailCache.delete(id)
+  thumbnailBackfillIds.delete(id)
 }
 
 async function clearImages() {
@@ -109,15 +144,47 @@ async function clearImages() {
 async function storeImage(dataUrl: string, source: NonNullable<StoredImage['source']> = 'upload') {
   const id = await hashDataUrl(dataUrl)
   cacheImage(id, dataUrl)
-  if (!persistedImageIds.has(id)) {
-    await putImage({ id, dataUrl, createdAt: Date.now(), source })
-    const thumbnail = await getImageThumbnail(id)
-    if (thumbnail) cacheThumbnail(id, {
-      dataUrl: thumbnail.thumbnailDataUrl,
-      width: thumbnail.width,
-      height: thumbnail.height,
-      thumbnailVersion: thumbnail.thumbnailVersion,
-    })
+  const existingImage = persistedImageIds.has(id) ? undefined : await getImage(id)
+  if (existingImage) {
+    persistedImageIds.add(id)
+    const existingThumbnail = await getStorage().getStoredFreshImageThumbnail(id)
+    if (existingThumbnail?.thumbnailDataUrl) {
+      cacheThumbnail(id, {
+        dataUrl: existingThumbnail.thumbnailDataUrl,
+        width: existingThumbnail.width,
+        height: existingThumbnail.height,
+        thumbnailVersion: existingThumbnail.thumbnailVersion,
+      })
+    } else {
+      const thumbnail = await getImageThumbnail(id)
+      if (thumbnail?.thumbnailDataUrl) {
+        cacheThumbnail(id, {
+          dataUrl: thumbnail.thumbnailDataUrl,
+          width: thumbnail.width,
+          height: thumbnail.height,
+          thumbnailVersion: thumbnail.thumbnailVersion,
+        })
+      }
+    }
+  } else if (!persistedImageIds.has(id)) {
+    const thumbnailMetadata = await safeCreateImageThumbnail(dataUrl)
+    await putImage({ id, dataUrl, createdAt: Date.now(), source, width: thumbnailMetadata.width, height: thumbnailMetadata.height })
+    if (thumbnailMetadata.thumbnailDataUrl) {
+      const thumbnail: StoredImageThumbnail = {
+        id,
+        thumbnailDataUrl: thumbnailMetadata.thumbnailDataUrl,
+        width: thumbnailMetadata.width,
+        height: thumbnailMetadata.height,
+        thumbnailVersion: CURRENT_THUMBNAIL_VERSION,
+      }
+      await getStorage().putImageThumbnail(thumbnail)
+      cacheThumbnail(id, {
+        dataUrl: thumbnail.thumbnailDataUrl,
+        width: thumbnail.width,
+        height: thumbnail.height,
+        thumbnailVersion: thumbnail.thumbnailVersion,
+      })
+    }
   }
   return id
 }
@@ -191,7 +258,7 @@ export async function ensureImageThumbnailCached(id: string): Promise<{ dataUrl:
   const cached = getCachedThumbnail(id)
   if (cached) return cached
 
-  const rec = await getStoredFreshImageThumbnail(id)
+  const rec = await getStorage().getStoredFreshImageThumbnail(id)
   if (!rec?.thumbnailDataUrl) {
     scheduleThumbnailBackfill([id], 'visible')
     return undefined
@@ -242,7 +309,7 @@ function scheduleThumbnailBackfillTick() {
     void processNextThumbnailBackfill()
   }
 
-  if ('requestIdleCallback' in window) {
+  if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
     window.requestIdleCallback(run, { timeout: 2_000 })
   } else {
     globalThis.setTimeout(run, 250)
@@ -262,12 +329,7 @@ async function getNextThumbnailBackfillBatch() {
   const candidates = getOrderedThumbnailBackfillIds().slice(0, MAX_THUMBNAIL_BACKFILL_CONCURRENT)
   if (candidates.length === 0) return []
 
-  const sizes = await Promise.all(candidates.map(async (id) => {
-    const image = await getImage(id)
-    return { width: image?.width, height: image?.height }
-  }))
-  const concurrency = getThumbnailConcurrencyForBatch(sizes)
-  const selected = candidates.slice(0, concurrency)
+  const selected = candidates.slice(0, MAX_THUMBNAIL_BACKFILL_CONCURRENT)
   for (const id of selected) thumbnailBackfillIds.delete(id)
   return selected
 }
@@ -280,19 +342,6 @@ function getOrderedThumbnailBackfillIds() {
     else background.push(id)
   }
   return [...visible, ...background]
-}
-
-function getThumbnailConcurrencyForBatch(sizes: Array<{ width?: number; height?: number }>) {
-  let maxMegapixels = 0
-  for (const { width, height } of sizes) {
-    if (!width || !height) return 1
-    maxMegapixels = Math.max(maxMegapixels, (width * height) / 1_000_000)
-  }
-  const megapixels = maxMegapixels
-  if (megapixels >= 8) return 1
-  if (megapixels >= 4) return 2
-  if (megapixels >= 2) return 3
-  return 4
 }
 
 function startThumbnailBackfill(id: string) {
@@ -1136,7 +1185,9 @@ export async function initStore() {
       await deleteImage(imgId)
     }
   }
-  scheduleThumbnailBackfill(referencedImageIds)
+  // Warm a small recent batch only. Visible cards request the rest on demand,
+  // which avoids a server-storage fetch/decode storm for large histories.
+  scheduleThumbnailBackfill(referencedImageIds.slice(0, INITIAL_THUMBNAIL_BACKFILL_LIMIT))
 
   const restoredInputImages: InputImage[] = []
   for (const img of persistedInputImages) {
@@ -2007,7 +2058,7 @@ export async function importData(file: File, options: ImportOptions = { importCo
         const bytes = unzipped[info.path]
         if (!bytes) continue
         const thumbnailDataUrl = bytesToDataUrl(bytes, info.path)
-        await putImageThumbnail({
+        await getStorage().putImageThumbnail({
           id,
           thumbnailDataUrl,
           width: info.width,
@@ -2060,6 +2111,45 @@ export async function importData(file: File, options: ImportOptions = { importCo
         'error',
       )
     return false
+  }
+}
+
+function loadThumbnailImage(dataUrl: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => resolve(image)
+    image.onerror = () => reject(new Error('图片加载失败'))
+    image.src = dataUrl
+  })
+}
+
+async function createImageThumbnail(dataUrl: string): Promise<Omit<StoredImageThumbnail, 'id'>> {
+  const image = await loadThumbnailImage(dataUrl)
+  const width = image.naturalWidth
+  const height = image.naturalHeight
+  if (width <= 0 || height <= 0) throw new Error('图片尺寸无效')
+
+  const scale = Math.min(1, 720 / Math.max(width, height))
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, Math.round(width * scale))
+  canvas.height = Math.max(1, Math.round(height * scale))
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('当前浏览器不支持 Canvas')
+  ctx.drawImage(image, 0, 0, canvas.width, canvas.height)
+
+  return {
+    thumbnailDataUrl: canvas.toDataURL('image/webp', 0.9),
+    width,
+    height,
+    thumbnailVersion: CURRENT_THUMBNAIL_VERSION,
+  }
+}
+
+async function safeCreateImageThumbnail(dataUrl: string): Promise<Partial<Omit<StoredImageThumbnail, 'id'>>> {
+  try {
+    return await createImageThumbnail(dataUrl)
+  } catch {
+    return {}
   }
 }
 

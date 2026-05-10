@@ -11,9 +11,14 @@ const storageMock = vi.hoisted(() => {
     clearTasks: vi.fn(),
     getImage: vi.fn(),
     getAllImages: vi.fn(),
+    getAllImageIds: vi.fn(),
     putImage: vi.fn(),
     deleteImage: vi.fn(),
     clearImages: vi.fn(),
+    getImageThumbnail: vi.fn(),
+    getStoredFreshImageThumbnail: vi.fn(),
+    putImageThumbnail: vi.fn(),
+    deleteImageThumbnail: vi.fn(),
     getAllCanvasImages: vi.fn(),
     putCanvasImage: vi.fn(),
     deleteCanvasImage: vi.fn(),
@@ -34,7 +39,7 @@ vi.mock('./lib/storage', () => ({
   testServerStorage: storageMock.testServerStorage,
 }))
 
-import { editOutputs, ensureImageCached, getPersistedState, getTaskApiProfile, initStore, markInterruptedOpenAIRunningTasks, reuseConfig, submitTask, useStore } from './store'
+import { editOutputs, ensureImageCached, ensureImageThumbnailCached, getPersistedState, getTaskApiProfile, initStore, markInterruptedOpenAIRunningTasks, reuseConfig, submitTask, useStore } from './store'
 
 const imageA = { id: 'image-a', dataUrl: 'data:image/png;base64,a' }
 
@@ -80,9 +85,13 @@ describe('mask draft lifecycle in store actions', () => {
     storageMock.adapter.getAllTasks.mockResolvedValue([])
     storageMock.adapter.getAllCanvasImages.mockResolvedValue([])
     storageMock.adapter.getAllImages.mockResolvedValue([])
+    storageMock.adapter.getAllImageIds.mockResolvedValue([])
     storageMock.adapter.getImage.mockResolvedValue(undefined)
+    storageMock.adapter.getStoredFreshImageThumbnail.mockResolvedValue(undefined)
+    storageMock.adapter.getImageThumbnail.mockResolvedValue(undefined)
     storageMock.adapter.putTask.mockResolvedValue(undefined)
     storageMock.adapter.putImage.mockResolvedValue(undefined)
+    storageMock.adapter.putImageThumbnail.mockResolvedValue(undefined)
     storageMock.adapter.deleteImage.mockResolvedValue(undefined)
   })
 
@@ -142,7 +151,61 @@ describe('mask draft lifecycle in store actions', () => {
     await initStore()
 
     expect(useStore.getState().tasks.map((item) => item.id)).toEqual(['task-with-image'])
-    expect(storageMock.adapter.getAllImages).toHaveBeenCalledTimes(1)
+    expect(storageMock.adapter.getAllImageIds).toHaveBeenCalledTimes(1)
+    expect(storageMock.adapter.getAllImages).not.toHaveBeenCalled()
+    expect(storageMock.adapter.getImage).not.toHaveBeenCalledWith('image-a')
+  })
+
+  it('limits startup thumbnail backfill to recent referenced images', async () => {
+    const idleCallbacks: Array<() => void> = []
+    vi.stubGlobal('window', {
+      ...globalThis.window,
+      requestIdleCallback: vi.fn((callback: () => void) => {
+        idleCallbacks.push(callback)
+        return idleCallbacks.length
+      }),
+    })
+
+    const imageIds = Array.from({ length: 20 }, (_, index) => `image-${index}`)
+    storageMock.adapter.getAllTasks.mockResolvedValue(imageIds.map((id, index) => task({
+      id: `task-${index}`,
+      outputImages: [id],
+      createdAt: index,
+    })))
+    storageMock.adapter.getAllImageIds.mockResolvedValue(imageIds)
+
+    try {
+      await initStore()
+
+      for (let cycle = 0; cycle < 20 && idleCallbacks.length > 0; cycle++) {
+        const callbacks = idleCallbacks.splice(0)
+        for (const callback of callbacks) callback()
+        await Promise.resolve()
+        await Promise.resolve()
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      }
+
+      const backfilledIds = storageMock.adapter.getStoredFreshImageThumbnail.mock.calls.map(([id]) => id)
+      expect(backfilledIds).toEqual(imageIds.slice(0, 12))
+      expect(storageMock.adapter.getImage).not.toHaveBeenCalledWith('image-12')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('loads thumbnails through the storage adapter without fetching full images', async () => {
+    storageMock.adapter.getStoredFreshImageThumbnail.mockResolvedValue({
+      id: 'image-a',
+      thumbnailDataUrl: 'data:image/webp;base64,thumb',
+      width: 10,
+      height: 12,
+      thumbnailVersion: 2,
+    })
+
+    const thumbnail = await ensureImageThumbnailCached('image-a')
+
+    expect(thumbnail).toEqual({ dataUrl: 'data:image/webp;base64,thumb', width: 10, height: 12, thumbnailVersion: 2 })
+    expect(storageMock.adapter.getStoredFreshImageThumbnail).toHaveBeenCalledWith('image-a')
     expect(storageMock.adapter.getImage).not.toHaveBeenCalledWith('image-a')
   })
 
