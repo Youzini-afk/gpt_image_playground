@@ -5,8 +5,8 @@ Frontend business and infrastructure library. This directory contains API provid
 
 ## Design
 - Provider Strategy: `api.ts` selects OpenAI-compatible, fal.ai, or custom HTTP provider implementations based on `getActiveApiProfile(settings)` and `getCustomProviderDefinition()`.
-- Storage Adapter: `storage.ts` abstracts local IndexedDB and server REST storage behind a shared `StorageAdapter` interface.
-- Thumbnail Store: `db.ts` keeps thumbnails in a separate object store and exposes freshness/version helpers used by `store.ts`.
+- Storage Adapter: `storage.ts` abstracts local IndexedDB and server REST storage behind a shared `StorageAdapter` interface for tasks, full images, image IDs, thumbnails, and canvas images.
+- Thumbnail Store: local mode keeps thumbnails in the `db.ts` object store; server mode stores them through `/api/storage/images/:id/thumbnail`, with freshness/version checks exposed by the storage adapter.
 - Compatibility Normalizers: `apiProfiles.ts`, `urlSettings.ts`, `paramCompatibility.ts`, `size.ts`, and `devProxy.ts` normalize old settings, URL imports, provider-specific limits, image dimensions, and proxy URLs before requests are made.
 - Canvas Utility Layer: Canvas/image/mask modules isolate browser image manipulation from React components.
 
@@ -24,7 +24,7 @@ Frontend business and infrastructure library. This directory contains API provid
 - `size.ts`: Normalizes custom dimensions to safe image sizes, rounds to multiples of 16, clamps aspect ratio and pixel bounds, and formats ratios/tiers.
 
 ## Storage Modules
-- `storage.ts`: Runtime switch between `LocalStorageAdapter` and `ServerStorageAdapter`; tests server storage through `/api/storage/ping`.
+- `storage.ts`: Runtime switch between `LocalStorageAdapter` and `ServerStorageAdapter`; owns image ID enumeration and thumbnail read/write methods; tests server storage through `/api/storage/ping`.
 - `db.ts`: IndexedDB wrapper for tasks, images, thumbnails, and canvasImages stores. Hashes image data URLs with SHA-256, stores thumbnail metadata separately, and deletes image/thumbnail records together.
 
 ## Image, Mask, Canvas, And UI Utility Modules
@@ -51,4 +51,4 @@ Frontend business and infrastructure library. This directory contains API provid
 ## Storage Control Flow
 1. `initStorageMode()` in `store.ts` calls `testServerStorage()` when settings request server storage.
 2. `setStorageMode()` selects an adapter.
-3. Store CRUD helpers call `getStorage()` and remain unaware of IndexedDB vs server REST details.
+3. Store CRUD helpers call `getStorage()` and remain unaware of IndexedDB vs server REST details, including thumbnail reads/writes and lightweight image ID enumeration.

@@ -14,7 +14,7 @@ React frontend application layer for GPT Image Playground. This directory owns b
 - State Container Pattern: `store.ts` uses Zustand with persist middleware. Persisted state keeps settings, generation params, prompt, input image IDs, stripped input image metadata, dismissed prompts, and UI preferences.
 - Adapter Pattern: `lib/storage.ts` switches between IndexedDB-backed `LocalStorageAdapter` and REST-backed `ServerStorageAdapter` without changing store callers.
 - Provider Strategy: `lib/api.ts` dispatches to OpenAI-compatible, fal.ai, or custom HTTP provider clients based on the active API profile/custom provider definition.
-- Thumbnail Split: full image data stays in image storage/cache; thumbnails live in a separate IndexedDB store/cache and are backfilled lazily for visible/background images.
+- Thumbnail Split: full image data stays in image storage/cache; thumbnails live behind the storage adapter, using IndexedDB locally and server SQLite in server mode, then are cached/backfilled lazily for visible/background images.
 - Portal/Overlay UI Shell: App-level modals and global menus are mounted once at the root and driven by store state.
 
 ## Bootstrap Flow
@@ -36,8 +36,8 @@ React frontend application layer for GPT Image Playground. This directory owns b
 ## Data Flow
 - UI reads/writes reactive state through `useStore` selectors.
 - `store.ts` persists durable task/image/canvas data through `getStorage()`.
-- Browser local mode writes tasks/images/canvas to IndexedDB through `lib/db.ts`; thumbnails are stored locally by `db.ts`.
-- Server mode sends JSON requests to `/api/storage/*` through `ServerStorageAdapter`.
+- Browser local mode writes tasks/images/canvas/thumbnails to IndexedDB through `lib/db.ts`.
+- Server mode sends JSON requests to `/api/storage/*` through `ServerStorageAdapter`, including lightweight image ID listing and thumbnail persistence endpoints.
 - API calls never store image bytes directly in task records; tasks reference image IDs and optional raw URL/payload metadata.
 
 ## Integration Points

@@ -53,10 +53,10 @@ GPT Image Playground is a React/TypeScript web app for image generation and edit
 
 ### Storage
 1. Frontend code calls `getStorage()` from `src/lib/storage.ts`.
-2. Local mode delegates tasks/images/canvas records to IndexedDB in `src/lib/db.ts`; thumbnails are also managed by `db.ts`.
-3. Server mode calls `/api/storage/*` on the Hono server for tasks/images/canvas data.
-4. `server/routes.ts` maps REST endpoints to `FileStorage`.
-5. `server/storage.ts` persists JSON blobs in SQLite and migrates legacy JSON files if needed.
+2. Local mode delegates tasks/images/canvas records to IndexedDB in `src/lib/db.ts`; server mode delegates through REST endpoints backed by SQLite.
+3. `StorageAdapter` also owns image ID enumeration and thumbnail read/write paths, so server storage can list image IDs without transferring full base64 images and can persist thumbnails in SQLite.
+4. `server/routes.ts` maps REST endpoints to `FileStorage`, including `/images/ids` and `/images/:id/thumbnail`.
+5. `server/storage.ts` persists task/image/canvas JSON plus `image_thumbnails` rows in SQLite and migrates legacy JSON files if needed.
 
 ### API Proxy And Custom Providers
 1. `src/lib/urlSettings.ts` and `src/lib/apiProfiles.ts` normalize URL/imported settings into profile/custom-provider definitions.
