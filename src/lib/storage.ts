@@ -1,4 +1,4 @@
-import type { TaskRecord, StoredImage, CanvasImage } from '../types'
+import type { TaskRecord, StoredImage, StoredImageThumbnail, CanvasImage } from '../types'
 import * as localDb from './db'
 
 export type StorageMode = 'local' | 'server'
@@ -10,9 +10,14 @@ export interface StorageAdapter {
   clearTasks(): Promise<void>
   getImage(id: string): Promise<StoredImage | undefined>
   getAllImages(): Promise<StoredImage[]>
+  getAllImageIds(): Promise<string[]>
   putImage(image: StoredImage): Promise<void>
   deleteImage(id: string): Promise<void>
   clearImages(): Promise<void>
+  getImageThumbnail(id: string): Promise<StoredImageThumbnail | undefined>
+  getStoredFreshImageThumbnail(id: string): Promise<StoredImageThumbnail | undefined>
+  putImageThumbnail(thumbnail: StoredImageThumbnail): Promise<void>
+  deleteImageThumbnail(id: string): Promise<void>
   getAllCanvasImages(): Promise<CanvasImage[]>
   putCanvasImage(item: CanvasImage): Promise<void>
   deleteCanvasImage(id: string): Promise<void>
@@ -26,9 +31,14 @@ class LocalStorageAdapter implements StorageAdapter {
   clearTasks() { return localDb.clearTasks().then(() => {}) }
   getImage(id: string) { return localDb.getImage(id) }
   getAllImages() { return localDb.getAllImages() }
+  getAllImageIds() { return localDb.getAllImageIds() }
   putImage(image: StoredImage) { return localDb.putImage(image).then(() => {}) }
   deleteImage(id: string) { return localDb.deleteImage(id).then(() => {}) }
   clearImages() { return localDb.clearImages().then(() => {}) }
+  getImageThumbnail(id: string) { return localDb.getImageThumbnail(id) }
+  getStoredFreshImageThumbnail(id: string) { return localDb.getStoredFreshImageThumbnail(id) }
+  putImageThumbnail(thumbnail: StoredImageThumbnail) { return localDb.putImageThumbnail(thumbnail).then(() => {}) }
+  async deleteImageThumbnail(id: string) { await localDb.deleteImageThumbnail(id) }
   getAllCanvasImages() { return localDb.getAllCanvasImages() }
   putCanvasImage(item: CanvasImage) { return localDb.putCanvasImage(item).then(() => {}) }
   deleteCanvasImage(id: string) { return localDb.deleteCanvasImage(id).then(() => {}) }
@@ -78,14 +88,19 @@ class ServerStorageAdapter implements StorageAdapter {
     try {
       const res = await this.request(`/images/${encodeURIComponent(id)}`)
       return res.json()
-    } catch (err: any) {
-      if (err.message?.includes('Storage API error: 404')) return undefined
+    } catch (err: unknown) {
+      if (err instanceof Error && err.message.includes('Storage API error: 404')) return undefined
       throw err
     }
   }
 
   async getAllImages(): Promise<StoredImage[]> {
     const res = await this.request('/images?full=true')
+    return res.json()
+  }
+
+  async getAllImageIds(): Promise<string[]> {
+    const res = await this.request('/images/ids')
     return res.json()
   }
 
@@ -99,6 +114,32 @@ class ServerStorageAdapter implements StorageAdapter {
 
   async clearImages(): Promise<void> {
     await this.request('/images', { method: 'DELETE' })
+  }
+
+  async getImageThumbnail(id: string): Promise<StoredImageThumbnail | undefined> {
+    try {
+      const res = await this.request(`/images/${encodeURIComponent(id)}/thumbnail`)
+      return res.json()
+    } catch (err: unknown) {
+      if (err instanceof Error && err.message.includes('Storage API error: 404')) return undefined
+      throw err
+    }
+  }
+
+  async getStoredFreshImageThumbnail(id: string): Promise<StoredImageThumbnail | undefined> {
+    const thumbnail = await this.getImageThumbnail(id)
+    return thumbnail?.thumbnailVersion === localDb.CURRENT_THUMBNAIL_VERSION ? thumbnail : undefined
+  }
+
+  async putImageThumbnail(thumbnail: StoredImageThumbnail): Promise<void> {
+    await this.request(`/images/${encodeURIComponent(thumbnail.id)}/thumbnail`, {
+      method: 'POST',
+      body: JSON.stringify(thumbnail),
+    })
+  }
+
+  async deleteImageThumbnail(id: string): Promise<void> {
+    await this.request(`/images/${encodeURIComponent(id)}/thumbnail`, { method: 'DELETE' })
   }
 
   async getAllCanvasImages(): Promise<CanvasImage[]> {
@@ -142,7 +183,7 @@ export async function testServerStorage(): Promise<{ ok: boolean; error?: string
     if (!res.ok) return { ok: false, error: `HTTP ${res.status}` }
     const data = await res.json()
     return { ok: !!data.ok }
-  } catch (err: any) {
-    return { ok: false, error: err.message || 'Connection failed' }
+  } catch (err: unknown) {
+    return { ok: false, error: err instanceof Error ? err.message : 'Connection failed' }
   }
 }

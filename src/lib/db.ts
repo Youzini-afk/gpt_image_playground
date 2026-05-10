@@ -89,6 +89,10 @@ export function putImageThumbnail(thumbnail: StoredImageThumbnail): Promise<IDBV
   return dbTransaction(STORE_THUMBNAILS, 'readwrite', (s) => s.put(thumbnail))
 }
 
+export function deleteImageThumbnail(id: string): Promise<undefined> {
+  return dbTransaction(STORE_THUMBNAILS, 'readwrite', (s) => s.delete(id))
+}
+
 export async function getImageThumbnail(id: string): Promise<StoredImageThumbnail | undefined> {
   const existingThumbnail = await getStoredImageThumbnail(id)
   if (existingThumbnail?.thumbnailVersion === THUMBNAIL_VERSION) {
