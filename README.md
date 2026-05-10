@@ -1,6 +1,6 @@
 # GPT Image Playground
 
-基于 OpenAI 图像生成接口的图片生成与编辑工具。提供简洁精美的 Web UI，支持文本生图、参考图与遮罩编辑，数据纯本地化存储，带来流畅的历史记录与参数管理体验。
+面向多类图像生成接口的图片生成与编辑工具。提供简洁精美的 Web UI，支持 OpenAI / OpenAI 兼容接口、fal.ai 与可导入的自定义 HTTP 服务商，支持文本生图、参考图与遮罩编辑，数据纯本地化存储，带来流畅的历史记录与参数管理体验。
 
 > 若需调用非 HTTPS 的内网或本地 HTTP API，请使用 GitHub Pages 版本或自行部署，Vercel 部署的体验版绑定的 `.dev` 域名因安全策略通常要求接口必须为 HTTPS。
 
@@ -60,16 +60,21 @@
 
 ### ⚙️ 精细化参数追踪
 - **智能尺寸控制**：提供 1K/2K/4K 快速预设，自定义宽高时会自动规整至模型安全范围（16 的倍数、总像素校验等）。
-- **实际参数对比**：自动提取 API 响应中真实生效的尺寸、质量、耗时以及**模型改写后的提示词**，与你的请求参数高亮对比。
+- **实际参数对比**：自动提取 API 响应中真实生效的尺寸、质量、耗时以及**模型改写后的提示词**，与你的请求参数高亮对比。支持定制化的参数列表横向平滑滚动体验。
 
 ### 📁 高效历史管理 (纯本地)
 - **瀑布流与画廊**：历史任务自动保存，支持按状态过滤、全屏大图预览与快捷下载。
 - **快捷批量操作**：桌面端支持鼠标拖拽框选、Ctrl/⌘ 连选，移动端支持顺滑侧滑多选；轻松实现批量收藏与清理。
 - **极致性能与隐私**：所有记录与图片均存放在浏览器 IndexedDB 中（采用 SHA-256 去重压缩），不经过任何第三方服务器。支持一键打包导出 ZIP 备份。
 
-### 🔌 API 兼容增强
-- **Codex CLI 兼容模式**：专为非标准 API (如 Codex CLI) 打造。开启后自动固定无效参数，将 Images API 的多图请求拆分为并发单图。
+### 🔌 多配置与服务商增强
+- **多配置管理**：支持创建并保存多个 API 配置（包含服务商、API Key、模型等），按需快速切换；支持通过拖拽对配置列表与服务商列表进行自定义排序。
+- **多服务商接入**：内置 OpenAI 兼容接口（含 `Images API` 和 `Responses API`）、fal.ai（支持队列），并支持通过 JSON 导入自定义 HTTP 服务商配置（兼容同步/异步任务）。
+- **API 代理**：OpenAI 兼容接口与 fal.ai 均可配置自定义代理。其中 OpenAI 兼容接口可开启同源 `/api-proxy/` 代理，交由 Docker 或本地开发环境转发至真实 API，绕开浏览器 CORS 限制。
+- **Codex CLI 兼容模式**：对上游为 Codex CLI 的 API，开启后应用 Codex CLI 实际支持的参数，并将多图生成拆分为并发单图。
 - **提示词防改写**：Responses API 会始终在请求文本前加入强制指令防止提示词被改写；开启 Codex CLI 模式后，Images API 也会获得同等保护。
+- **智能诊断提示**：当检测到接口异常改写行为或缺少常规参数时，自动提示开启相应的兼容模式。
+- **习惯配置**：支持设置提交后清空输入、重启后保留历史输入、临时复用历史任务 API 配置等。
 
 ---
 
@@ -86,6 +91,8 @@
 
 **配置默认 API URL**：在 Vercel 项目的 **Settings → Environment Variables** 中添加 `VITE_DEFAULT_API_URL`（如 `https://api.openai.com/v1`），然后重新部署即可生效。
 
+**绑定自定义域名 (国内直连)**：Vercel 默认分配的 `.vercel.app` 域名在国内通常无法直接访问。如果你希望在国内直连访问，请在 Vercel 项目的 **Settings → Domains** 中绑定你自己的域名。
+
 **配置自动更新**：
 
 本项目已在 `vercel.json` 中关闭了默认的自动部署。若需在同步 GitHub 上游代码后自动更新 Vercel 部署：
@@ -98,7 +105,40 @@
 </details>
 
 <details>
-<summary><strong>🐳 方式二：Docker 部署</strong></summary>
+<summary><strong>☁️ 方式二：Cloudflare Workers 部署</strong></summary>
+
+项目已内置 Wrangler 配置，可将 Vite 构建产物作为 Cloudflare Workers 静态资源部署。
+
+**1. 登录 Cloudflare**
+
+```bash
+npx wrangler login
+```
+
+**2. 部署到 Workers**
+
+```bash
+npm run deploy:cf
+```
+
+部署脚本会先执行 `npm run build`，再通过 `wrangler deploy` 上传 `dist/` 目录。
+
+**配置默认 API URL**：Cloudflare Workers 的环境变量不会自动改写已经构建好的静态文件。若需预设默认 API 地址，请在构建前设置 `VITE_DEFAULT_API_URL` 后再部署。
+
+```bash
+VITE_DEFAULT_API_URL=https://api.openai.com/v1 npm run deploy:cf
+```
+
+PowerShell 示例：
+
+```powershell
+$env:VITE_DEFAULT_API_URL="https://api.openai.com/v1"; npm run deploy:cf
+```
+
+</details>
+
+<details>
+<summary><strong>🐳 方式三：Docker 部署</strong></summary>
 
 官方镜像已发布至 GitHub Container Registry。Docker 部署支持在运行时注入默认配置。
 
@@ -106,10 +146,11 @@
 
 - `DEFAULT_API_URL`：设置页面上默认显示的 API 地址。
 - `API_PROXY_URL`：配置内置代理的服务端兜底目标 API 地址（仅当前端未传目标时使用）。
-- `ENABLE_API_PROXY`：设为 `true` 开启容器内置同源代理，用于解决浏览器跨域（CORS）限制。开启后，浏览器将请求同源的 `/api-proxy/`，再由服务端转发至页面设置中的 API URL。
+- `ENABLE_API_PROXY`：设为 `true` 开启容器内置同源代理，用于解决浏览器跨域（CORS）限制。开启后，浏览器将请求同源的 `/api-proxy/`，再由服务端转发至页面设置中的 API URL；用户仍可在设置中手动关闭。
+- `LOCK_API_PROXY`：设为 `true` 时，在 `ENABLE_API_PROXY=true` 的前提下将前端 **API 代理** 开关强制锁定为开启，用户无法关闭。
 - `HOST` / `PORT`：指定容器内服务监听的地址和端口（默认 `0.0.0.0:80`）。
 
-> ⚠️ **安全警告**：开启 API 代理后，浏览器端填写的 API URL 会由你的服务器代为请求。公开部署时，任何访问者都可能借用你的服务器作为代理。建议配置 `ACCESS_PASSWORD`、IP 白名单，或仅在本地/可信网络中开启。
+> ⚠️ **安全警告**：开启 API 代理后，任何人都能将你的服务器作为代理来请求目标 API。建议仅在有访问控制（如 IP 白名单）或本地网络中开启。
 
 > 💡 **兼容迁移**：旧版本中的 `API_URL` 已拆分为 `DEFAULT_API_URL` 和 `API_PROXY_URL`。容器启动时会自动将遗留的 `API_URL` 作为两个新变量的兜底值，实现无缝兼容。建议更新配置文件，逐步迁移至新变量。
 
@@ -119,6 +160,7 @@
 docker run -d -p 8080:80 \
   -e DEFAULT_API_URL=https://api.openai.com/v1 \
   -e ENABLE_API_PROXY=true \
+  -e LOCK_API_PROXY=true \
   -e API_PROXY_URL=https://api.openai.com/v1 \
   ghcr.io/cooksleep/gpt_image_playground:latest
 ```
@@ -138,20 +180,6 @@ services:
     restart: unless-stopped
 ```
 
-**3. Zeabur 部署提示**
-
-Zeabur 会自动检测并使用仓库根目录的 `Dockerfile`。在 Zeabur 服务的环境变量中建议配置：
-
-```env
-DEFAULT_API_URL=https://api.openai.com/v1
-ENABLE_API_PROXY=true
-API_PROXY_URL=https://api.openai.com/v1
-# 公开部署建议同时设置
-ACCESS_PASSWORD=your-password
-```
-
-部署完成后，Docker/Zeabur 环境会自动强制使用同源 `/api-proxy/`，由 Zeabur 容器转发到页面设置中填写的 **API URL**，避免浏览器直连接口时触发 CORS 或 HTTPS/HTTP 混合内容限制。`API_PROXY_URL` 只作为前端未传目标时的服务端兜底值；页面设置中的 **API 代理** 会显示为已启用状态。
-
 **更新说明：**
 
 使用 `latest` 标签时，重新拉取镜像并重启即可更新（如 `docker compose pull && docker compose up -d`）。若需固定版本可使用官方提供的版本号标签（如 `0.2.x`）。
@@ -159,7 +187,7 @@ ACCESS_PASSWORD=your-password
 </details>
 
 <details>
-<summary><strong>💻 方式三：本地开发与静态构建</strong></summary>
+<summary><strong>💻 方式四：本地开发与静态构建</strong></summary>
 
 **1. 环境准备与启动**
 
@@ -180,7 +208,17 @@ cp dev-proxy.config.example.json dev-proxy.config.json
 
 修改 `dev-proxy.config.json`，将 `target` 设置为真实的图片接口地址。重启开发服务器后，在页面设置中开启 **API 代理** 即可（请求将被转发如 `http://localhost:5173/api-proxy/... -> target/...`）。此功能仅在 `npm run dev` 阶段生效，不会影响打包产物。
 
-**3. 构建静态产物**
+**3. 本地故障模拟 API (可选)**
+
+如果需要复现图片 URL 跨域、接口返回结构异常、原始响应查看等问题，可启动内置模拟服务：
+
+```powershell
+npm run mock:api
+```
+
+使用方式见 [本地故障模拟 API](docs/mock-image-api.md)。
+
+**4. 构建静态产物**
 
 ```bash
 npm run build
@@ -192,35 +230,99 @@ npm run build
 
 ---
 
-## 🛠️ API 配置与 URL 传参
+## 🛠️ URL 传参快速填充
+
+
+### 设置功能概览
 
 点击页面右上角的 **设置 (⚙️)**，可以配置模型、密钥与其他参数。
 
-- **双接口模式**：支持 `Images API` (需填写 GPT Image 模型，如 `gpt-image-2`) 和 `Responses API` (需填写支持该工具的文本模型，如 `gpt-5.5`)。
-- **API 代理**：开启后，浏览器将请求同源的 `/api-proxy/` 路径，交由当前部署环境（Docker 或 本地开发）代理转发至真实 API，以绕开浏览器 CORS 限制。
+- **双接口模式**：支持 `Images API`（需填写 GPT Image 模型，如 `gpt-image-2`）和 `Responses API`（需填写支持该工具的文本模型，如 `gpt-5.5`）。
+- **自定义服务商**：可导入自定义 JSON Manifest，适配同步或异步的 OpenAI 风格图片接口。
+- **API 代理**：开启后，浏览器将请求同源的 `/api-proxy/` 路径，交由当前部署环境（Docker 或本地开发）代理转发至真实 API，以绕开浏览器 CORS 限制。
 - **编辑图字段兼容**：默认按 OpenAI 格式使用 `image[]` 上传编辑参考图；如果兼容接口报 `image is required for edits`，可在设置中打开“编辑图字段”开关，改用 `image` 字段。
-- **Codex CLI 模式**：如果你在使用源于 Codex CLI 的 API，可以在 `API URL` 右侧开启该模式。开启后会禁用不支持的 `quality` 参数，Images API 的多图生成也将改为并发单图请求。此外，提示词文本开头会加入简短的防改写指令，防止模型偏离原意。（注：Responses API 无论是否开启此模式，都会默认加入防改写指令）。
-- **智能诊断提示**：当应用检测到接口返回的提示词被强制改写，或缺少官方 API 常规返回的参数时，会主动提示你是否针对当前配置组合开启 Codex CLI 模式。
+- **数据存储模式**：本地浏览器 IndexedDB 与服务端存储模式可切换；Docker/Node 部署可使用服务端 SQLite 存储。
+- **Codex CLI 模式**：如果你在使用源于 Codex CLI 的 API，可以开启该模式。开启后会禁用不支持的 `quality` 参数，Images API 的多图生成也将改为并发单图请求。
 
-### URL 传参快速填充
+应用支持通过 URL 查询参数快速填入配置，非常适合创建书签或集成分享。根据你的服务商类型，选择对应的方式：
 
-应用支持通过 URL 查询参数快速填入配置，非常适合创建书签或集成分享：
-
+**方式一：标准 OpenAI 兼容服务商**
+直接使用简短的查询参数配置：
 - `?apiUrl=https://你的代理地址.com`
 - `?apiKey=sk-xxxx`
 - `?apiMode=images` 或 `?apiMode=responses`（未传时默认为 `images`）
+- `?model=gpt-image-2`（未传时按 `apiMode` 使用默认模型）
 - `?editImageField=image`（编辑参考图改用兼容字段；默认是 `image[]`）
-- `?codexCli=true`（强制开启 Codex CLI 模式）
+- `?codexCli=true`（开启 Codex CLI 兼容模式）
 
 例如，集成到 New API 的聊天系统：
 
 ```text
-https://gpt-image-playground.cooksleep.dev?apiUrl={address}&apiKey={key}
+https://gpt-image-playground.cooksleep.dev?apiUrl={address}&apiKey={key}&model={model}
 ```
 
 ```text
-https://cooksleep.github.io/gpt_image_playground?apiUrl={address}&apiKey={key}
+https://cooksleep.github.io/gpt_image_playground?apiUrl={address}&apiKey={key}&model={model}
 ```
+
+**方式二：自定义格式服务商**
+如果需要导入自定义格式的 API 配置，请使用 `settings` 参数并传入 URL 编码后的完整 JSON：
+- `?settings={URL编码后的JSON}`（只读取 `customProviders` 和 `profiles` 列表）
+
+> 推荐在项目内的 **设置 - API 配置 - 服务商类型 - 创建自定义服务商 - AI 一键生成与导入** 完成配置生成与导入后，在 **API 配置 - 当前配置 - 复制按钮** 处一键复制可导入配置的 URL。复制时可选择不包含 API Key，并使用变量（如 `{address}`、`{key}`、`{model}`）进行灵活替换，以便在 New API 等平台中无缝集成分享。
+
+JSON 结构示例：
+
+```json
+{
+  "customProviders": [
+    {
+      "id": "custom-example-task",
+      "name": "示例异步任务服务商",
+      "submit": {
+        "path": "images/generations",
+        "method": "POST",
+        "contentType": "json",
+        "body": {
+          "model": "$profile.model",
+          "prompt": "$prompt",
+          "size": "$params.size",
+          "quality": "$params.quality",
+          "output_format": "$params.output_format",
+          "output_compression": "$params.output_compression",
+          "n": "$params.n",
+          "image_urls": "$inputImages.dataUrls"
+        },
+        "taskIdPath": "data.0.task_id"
+      },
+      "poll": {
+        "path": "tasks/{task_id}",
+        "method": "GET",
+        "intervalSeconds": 5,
+        "statusPath": "data.status",
+        "successValues": ["completed"],
+        "failureValues": ["failed", "cancelled"],
+        "errorPath": "data.error.message",
+        "result": {
+          "imageUrlPaths": ["data.result.images.*.url.*"],
+          "b64JsonPaths": []
+        }
+      }
+    }
+  ],
+  "profiles": [
+    {
+      "name": "示例异步任务服务商",
+      "provider": "custom-example-task",
+      "baseUrl": "https://api.example.com/v1",
+      "model": "example-image-model",
+      "apiMode": "images"
+    }
+  ]
+}
+```
+
+第三方服务商可以参考 [自定义服务商 LLM 提示词](docs/custom-provider-llm-prompt.md)，让 LLM 根据自己的 API 文档生成可导入的完整配置。导入后只需要在设置里补充 API Key。
 
 ---
 
@@ -239,4 +341,10 @@ https://cooksleep.github.io/gpt_image_playground?apiUrl={address}&apiKey={key}
 
 ## ⭐ Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=CookSleep/gpt_image_playground&type=Date)](https://www.star-history.com/#CookSleep/gpt_image_playground&Date)
+<a href="https://www.star-history.com/#CookSleep/gpt_image_playground&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=CookSleep/gpt_image_playground&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=CookSleep/gpt_image_playground&type=Date" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=CookSleep/gpt_image_playground&type=Date" />
+  </picture>
+</a>

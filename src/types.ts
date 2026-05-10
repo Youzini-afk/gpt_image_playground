@@ -1,9 +1,58 @@
 // ===== 设置 =====
 
 export type ApiMode = 'images' | 'responses'
-export type ApiProvider = 'openai' | 'fal'
+export type BuiltInApiProvider = 'openai' | 'fal'
+export type ApiProvider = BuiltInApiProvider | string
 export type StorageMode = 'local' | 'server'
 export type EditImageField = 'image[]' | 'image'
+export type CustomProviderTemplate = 'http-image'
+
+export type CustomProviderRequestMethod = 'GET' | 'POST'
+export type CustomProviderContentType = 'json' | 'multipart'
+export type CustomProviderFileSource = 'inputImages' | 'mask'
+
+export interface CustomProviderFileMapping {
+  field: string
+  source: CustomProviderFileSource
+  array?: boolean
+}
+
+export interface CustomProviderResultMapping {
+  imageUrlPaths?: string[]
+  b64JsonPaths?: string[]
+}
+
+export interface CustomProviderSubmitMapping {
+  path: string
+  method?: CustomProviderRequestMethod
+  contentType?: CustomProviderContentType
+  query?: Record<string, string>
+  body?: Record<string, unknown>
+  files?: CustomProviderFileMapping[]
+  taskIdPath?: string
+  result?: CustomProviderResultMapping
+}
+
+export interface CustomProviderPollMapping {
+  path: string
+  method?: CustomProviderRequestMethod
+  query?: Record<string, string>
+  intervalSeconds?: number
+  statusPath: string
+  successValues: string[]
+  failureValues: string[]
+  errorPath?: string
+  result: CustomProviderResultMapping
+}
+
+export interface CustomProviderDefinition {
+  id: string
+  name: string
+  template?: CustomProviderTemplate
+  submit: CustomProviderSubmitMapping
+  editSubmit?: CustomProviderSubmitMapping
+  poll?: CustomProviderPollMapping
+}
 
 export interface ApiProfile {
   id: string
@@ -17,6 +66,8 @@ export interface ApiProfile {
   codexCli: boolean
   apiProxy: boolean
   editImageField: EditImageField
+  responseFormatB64Json?: boolean
+  providerDrafts?: Partial<Record<ApiProvider, Partial<Pick<ApiProfile, 'baseUrl' | 'model' | 'apiMode' | 'codexCli' | 'apiProxy' | 'editImageField' | 'responseFormatB64Json'>>>>
 }
 
 export interface AppSettings {
@@ -30,7 +81,12 @@ export interface AppSettings {
   apiProxy: boolean
   editImageField: EditImageField
   storageMode: StorageMode
+  customProviders: CustomProviderDefinition[]
+  providerOrder?: string[]
   clearInputAfterSubmit: boolean
+  persistInputOnRestart: boolean
+  reuseTaskApiProfileTemporarily: boolean
+  alwaysShowRetryButton: boolean
   profiles: ApiProfile[]
   activeProfileId: string
 }
@@ -80,6 +136,8 @@ export interface TaskRecord {
   params: TaskParams
   /** 生成时使用的 Provider 类型 */
   apiProvider?: ApiProvider
+  /** 生成时使用的 API 配置 ID */
+  apiProfileId?: string
   /** 生成时使用的 Provider 名称 */
   apiProfileName?: string
   /** 生成时使用的模型 ID */
@@ -90,6 +148,10 @@ export interface TaskRecord {
   falEndpoint?: string
   /** fal.ai 任务连接断开后是否等待自动恢复 */
   falRecoverable?: boolean
+  /** 自定义异步服务商任务 ID，用于重启后继续查询结果 */
+  customTaskId?: string
+  /** 自定义异步任务是否等待自动恢复 */
+  customRecoverable?: boolean
   /** API 返回的实际生效参数，用于标记与请求值不一致的情况 */
   actualParams?: Partial<TaskParams>
   /** 输出图片对应的实际生效参数，key 为 outputImages 中的图片 id */
@@ -102,6 +164,10 @@ export interface TaskRecord {
   maskImageId?: string | null
   /** 输出图片的 image store id 列表 */
   outputImages: string[]
+  /** API 返回的原始图片 HTTP URL（非 base64 时记录） */
+  rawImageUrls?: string[]
+  /** 发生解析错误时的原始响应 JSON */
+  rawResponsePayload?: string
   status: TaskStatus
   error: string | null
   createdAt: number
@@ -121,6 +187,22 @@ export interface StoredImage {
   createdAt?: number
   /** 图片来源：用户上传 / API 生成 / 遮罩 */
   source?: 'upload' | 'generated' | 'mask'
+  /** 原图宽度 */
+  width?: number
+  /** 原图高度 */
+  height?: number
+}
+
+export interface StoredImageThumbnail {
+  id: string
+  /** 列表缩略图，用于避免卡片页解码完整 4K 原图 */
+  thumbnailDataUrl: string
+  /** 原图宽度 */
+  width?: number
+  /** 原图高度 */
+  height?: number
+  /** 缩略图生成参数版本 */
+  thumbnailVersion?: number
 }
 
 // ===== API 请求体 =====
@@ -222,13 +304,22 @@ export interface CanvasImage {
 export interface ExportData {
   version: number
   exportedAt: string
-  settings: AppSettings
-  tasks: TaskRecord[]
+  settings?: AppSettings
+  tasks?: TaskRecord[]
   canvasImages?: CanvasImage[]
   /** imageId → 图片信息 */
-  imageFiles: Record<string, {
+  imageFiles?: Record<string, {
     path: string
     createdAt?: number
     source?: 'upload' | 'generated' | 'mask'
+    width?: number
+    height?: number
+  }>
+  /** imageId → 缩略图信息 */
+  thumbnailFiles?: Record<string, {
+    path: string
+    width?: number
+    height?: number
+    thumbnailVersion?: number
   }>
 }

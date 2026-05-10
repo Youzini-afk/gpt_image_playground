@@ -17,6 +17,7 @@ export interface CallApiOptions {
   inputImageDataUrls: string[]
   maskDataUrl?: string
   onFalRequestEnqueued?: (request: { requestId: string; endpoint: string }) => void
+  onCustomTaskEnqueued?: (task: { taskId: string }) => void
 }
 
 export interface CallApiResult {
@@ -28,6 +29,8 @@ export interface CallApiResult {
   actualParamsList?: Array<Partial<TaskParams> | undefined>
   /** 每张图片对应的 API 改写提示词 */
   revisedPrompts?: Array<string | undefined>
+  /** API 返回的原始图片 HTTP URL（非 base64 时记录） */
+  rawImageUrls?: string[]
 }
 
 export function isHttpUrl(value: unknown): value is string {
@@ -143,6 +146,26 @@ async function blobToDataUrl(blob: Blob, fallbackMime: string): Promise<string> 
   return `data:${blob.type || fallbackMime};base64,${btoa(binary)}`
 }
 
+export const IMAGE_FETCH_CORS_HINT = ' 可点链接按钮复制结果链接，或尝试开启「返回 Base64 图片数据」避免此问题。'
+
+async function probeNoCorsReachability(url: string, timeoutMs = 8000): Promise<'opaque' | 'reachable' | 'failed'> {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      mode: 'no-cors',
+      cache: 'no-store',
+      signal: controller.signal,
+    })
+    return response.type === 'opaque' ? 'opaque' : 'reachable'
+  } catch {
+    return 'failed'
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
+
 export async function fetchImageUrlAsDataUrl(url: string, fallbackMime: string, signal?: AbortSignal): Promise<string> {
   if (isDataUrl(url)) return url
 
@@ -157,9 +180,16 @@ export async function fetchImageUrlAsDataUrl(url: string, fallbackMime: string, 
       throw new Error('图片 URL 下载超时，请检查接口返回的图片地址是否可访问。')
     }
     if (isFetchNetworkError(error)) {
+      const probe = await probeNoCorsReachability(url)
+      if (probe === 'opaque') {
+        throw new Error(`图片已生成，但因服务商未允许跨域，图片链接下载失败。${IMAGE_FETCH_CORS_HINT}`)
+      }
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        throw new Error(`图片链接下载失败（网络不可用）。${IMAGE_FETCH_CORS_HINT}`)
+      }
       throw new Error([
         `图片 URL 下载失败：浏览器无法连接 ${url}`,
-        '如果接口返回的是远程图片 URL，请确认该地址允许浏览器跨域访问；更稳妥的方式是让接口直接返回 b64_json。',
+        `可能因跨域限制、链接过期或网络异常。${IMAGE_FETCH_CORS_HINT}`,
         `原始错误：${getErrorMessage(error)}`,
       ].join('\n'))
     }

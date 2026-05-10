@@ -22,4 +22,16 @@ describe('parameter compatibility', () => {
     expect(getOutputImageLimitForSettings(settings)).toBe(4)
     expect(normalizeParamsForSettings({ ...DEFAULT_PARAMS, n: 8 }, settings).n).toBe(4)
   })
+
+  it('only replaces fal.ai auto size in text-to-image mode', () => {
+    const falProfile = createDefaultFalProfile({ apiKey: 'fal-key' })
+    const settings = normalizeSettings({
+      ...DEFAULT_SETTINGS,
+      profiles: [falProfile],
+      activeProfileId: falProfile.id,
+    })
+
+    expect(normalizeParamsForSettings({ ...DEFAULT_PARAMS, size: 'auto' }, settings).size).toBe('1360x1024')
+    expect(normalizeParamsForSettings({ ...DEFAULT_PARAMS, size: 'auto' }, settings, { hasInputImages: true }).size).toBe('auto')
+  })
 })

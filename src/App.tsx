@@ -1,10 +1,8 @@
 import { useEffect } from 'react'
 import { initStore, initStorageMode, waitForStoreHydration } from './store'
 import { useStore } from './store'
-import { normalizeBaseUrl } from './lib/api'
-import { normalizeSettings, switchApiProfileProvider } from './lib/apiProfiles'
+import { buildSettingsFromUrlParams, clearUrlSettingParams, hasUrlSettingParams } from './lib/urlSettings'
 import { useDockerApiUrlMigrationNotice } from './hooks/useDockerApiUrlMigrationNotice'
-import type { ApiProvider, AppSettings } from './types'
 import Header from './components/Header'
 import SearchBar from './components/SearchBar'
 import TaskGrid from './components/TaskGrid'
@@ -47,78 +45,12 @@ export default function App() {
       await waitForStoreHydration()
 
       const searchParams = new URLSearchParams(window.location.search)
-      const nextSettings: Partial<AppSettings> = {}
-
-      const apiUrlParam = searchParams.get('apiUrl')
-      if (apiUrlParam !== null) {
-        nextSettings.baseUrl = normalizeBaseUrl(apiUrlParam.trim())
-      }
-
-      const apiKeyParam = searchParams.get('apiKey')
-      if (apiKeyParam !== null) {
-        nextSettings.apiKey = apiKeyParam.trim()
-      }
-
-      const codexCliParam = searchParams.get('codexCli')
-      if (codexCliParam !== null) {
-        nextSettings.codexCli = codexCliParam.trim().toLowerCase() === 'true'
-      }
-
-      const apiModeParam = searchParams.get('apiMode')
-      if (apiModeParam === 'images' || apiModeParam === 'responses') {
-        nextSettings.apiMode = apiModeParam
-      }
-
-      const editImageFieldParam = searchParams.get('editImageField')
-      if (editImageFieldParam === 'image' || editImageFieldParam === 'image[]') {
-        nextSettings.editImageField = editImageFieldParam
-      }
-
-      const providerParam = searchParams.get('provider')?.trim().toLowerCase()
-      if (providerParam) {
-        const provider: ApiProvider | null = providerParam === 'fal'
-          ? 'fal'
-          : ['openai', 'openai-compatible'].includes(providerParam)
-            ? 'openai'
-            : null
-        if (provider) {
-          const state = useStore.getState()
-          const settings = normalizeSettings(state.settings)
-          const current = settings.profiles.find((profile) => profile.id === settings.activeProfileId) ?? settings.profiles[0]
-          if (current) {
-            nextSettings.profiles = settings.profiles.map((profile) =>
-              profile.id === current.id
-                ? {
-                    ...switchApiProfileProvider(profile, provider),
-                    ...(nextSettings.baseUrl !== undefined ? { baseUrl: nextSettings.baseUrl } : {}),
-                    ...(nextSettings.apiKey !== undefined ? { apiKey: nextSettings.apiKey } : {}),
-                    ...(provider === 'openai' && nextSettings.apiMode !== undefined ? { apiMode: nextSettings.apiMode } : {}),
-                    ...(provider === 'openai' && nextSettings.codexCli !== undefined ? { codexCli: nextSettings.codexCli } : {}),
-                    ...(provider === 'openai' && nextSettings.editImageField !== undefined ? { editImageField: nextSettings.editImageField } : {}),
-                  }
-                : profile,
-            )
-            nextSettings.activeProfileId = current.id
-          }
-        }
-      }
+      const nextSettings = buildSettingsFromUrlParams(useStore.getState().settings, searchParams)
 
       setSettings(nextSettings)
 
-      if (
-        searchParams.has('apiUrl') ||
-        searchParams.has('apiKey') ||
-        searchParams.has('codexCli') ||
-        searchParams.has('apiMode') ||
-        searchParams.has('editImageField') ||
-        searchParams.has('provider')
-      ) {
-        searchParams.delete('apiUrl')
-        searchParams.delete('apiKey')
-        searchParams.delete('codexCli')
-        searchParams.delete('apiMode')
-        searchParams.delete('editImageField')
-        searchParams.delete('provider')
+      if (hasUrlSettingParams(searchParams)) {
+        clearUrlSettingParams(searchParams)
 
         const nextSearch = searchParams.toString()
         const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash}`

@@ -94,9 +94,10 @@ export function isApiProxyForced(proxyConfig: DevProxyConfig | null = readClient
   return readRuntimeEnv(import.meta.env.VITE_DOCKER_DEPLOYMENT) === 'true' && isApiProxyAvailable(proxyConfig)
 }
 
-export function shouldUseApiProxy(
-  userEnabled: boolean,
-  proxyConfig: DevProxyConfig | null = readClientDevProxyConfig(),
-): boolean {
-  return isApiProxyAvailable(proxyConfig) && (userEnabled || isApiProxyForced(proxyConfig))
+export function isApiProxyLocked(proxyConfig: DevProxyConfig | null = readClientDevProxyConfig()): boolean {
+  return readRuntimeEnv(import.meta.env.VITE_API_PROXY_LOCKED) === 'true' && isApiProxyAvailable(proxyConfig)
+}
+
+export function shouldUseApiProxy(apiProxy: boolean, proxyConfig: DevProxyConfig | null = readClientDevProxyConfig()): boolean {
+  return isApiProxyAvailable(proxyConfig) && (apiProxy || isApiProxyForced(proxyConfig) || isApiProxyLocked(proxyConfig))
 }
