@@ -1,7 +1,12 @@
-import { useMemo, useRef, useState, useEffect } from 'react'
+import { useMemo, useRef, useState, useEffect, useCallback } from 'react'
 import { useStore, reuseConfig, editOutputs, removeTask } from '../store'
+import { getFilteredTasks } from '../lib/tasks'
+import { selectionBoxRect, deriveSelection, type CardGeometry } from '../lib/selectionGeometry'
 import TaskCard from './TaskCard'
 import CanvasImageCard from './CanvasImageCard'
+
+const INITIAL_VISIBLE_TASKS = 60
+const VISIBLE_TASK_INCREMENT = 60
 
 export default function TaskGrid() {
   const tasks = useStore((s) => s.tasks)
@@ -28,36 +33,118 @@ export default function TaskGrid() {
   const startedOnCard = useRef(false)
   const startedWithCtrl = useRef(false)
   const initialSelection = useRef<string[]>([])
-  const isMac = /Mac|iPod|iPhone|iPad/.test(navigator.platform)
+  const isMac = /Mac|iPod|iPhone|iPad/.test(navigator.userAgent)
+  const cardGeometriesRef = useRef<CardGeometry[]>([])
+  const sentinelRef = useRef<HTMLDivElement>(null)
+  const autoLoadCooldownRef = useRef(false)
+
+  const visibleTaskFilterKey = `${searchQuery}\u0000${filterStatus}\u0000${filterFavorite ? '1' : '0'}`
+  const [visibleTaskWindow, setVisibleTaskWindow] = useState({
+    key: visibleTaskFilterKey,
+    count: INITIAL_VISIBLE_TASKS,
+  })
+
+  useEffect(() => {
+    setVisibleTaskWindow({ key: visibleTaskFilterKey, count: INITIAL_VISIBLE_TASKS })
+  }, [visibleTaskFilterKey])
 
   const filteredTasks = useMemo(() => {
-    const sorted = [...tasks].sort((a, b) => b.createdAt - a.createdAt)
-    const q = searchQuery.trim().toLowerCase()
-    
-    return sorted.filter((t) => {
-      if (filterFavorite && !t.isFavorite) return false
-      const matchStatus = filterStatus === 'all' || t.status === filterStatus
-      if (!matchStatus) return false
-      
-      if (!q) return true
-      const prompt = (t.prompt || '').toLowerCase()
-      const paramStr = JSON.stringify(t.params).toLowerCase()
-      return prompt.includes(q) || paramStr.includes(q)
-    })
+    return getFilteredTasks(tasks, searchQuery, filterStatus, filterFavorite)
   }, [tasks, searchQuery, filterStatus, filterFavorite])
 
-  const handleDelete = (task: typeof tasks[0]) => {
+  const visibleTaskCount = visibleTaskWindow.key === visibleTaskFilterKey
+    ? visibleTaskWindow.count
+    : INITIAL_VISIBLE_TASKS
+
+  const visibleTasks = useMemo(() => {
+    return filteredTasks.slice(0, visibleTaskCount)
+  }, [filteredTasks, visibleTaskCount])
+
+  const hiddenTaskCount = filteredTasks.length - visibleTasks.length
+
+  useEffect(() => {
+    if (!sentinelRef.current || hiddenTaskCount <= 0) return
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting && !autoLoadCooldownRef.current) {
+            autoLoadCooldownRef.current = true
+            setVisibleTaskWindow((current) => ({
+              key: visibleTaskFilterKey,
+              count: (current.key === visibleTaskFilterKey ? current.count : INITIAL_VISIBLE_TASKS) + VISIBLE_TASK_INCREMENT,
+            }))
+            window.setTimeout(() => {
+              autoLoadCooldownRef.current = false
+            }, 300)
+          }
+        }
+      },
+      { rootMargin: '100px' },
+    )
+    observer.observe(sentinelRef.current)
+    return () => observer.disconnect()
+  }, [hiddenTaskCount, visibleTaskFilterKey])
+
+  const selectedTaskIdSet = useMemo(() => new Set(selectedTaskIds), [selectedTaskIds])
+
+  const handleCardClick = useCallback((task: typeof tasks[0], e: React.MouseEvent | React.TouchEvent) => {
+    if (Date.now() < suppressClickUntil.current) {
+      e.preventDefault()
+      return
+    }
+    suppressClickUntil.current = 0
+    const isCtrl = isMac ? e.metaKey : e.ctrlKey
+    if (isCtrl) {
+      useStore.getState().toggleTaskSelection(task.id)
+    } else if (useStore.getState().selectedTaskIds.length > 0) {
+      clearSelection()
+      setDetailTaskId(task.id)
+    } else {
+      setDetailTaskId(task.id)
+    }
+  }, [isMac, clearSelection, setDetailTaskId])
+
+  const handleReuseTask = useCallback((task: typeof tasks[0]) => {
+    reuseConfig(task)
+  }, [])
+
+  const handleEditOutputsTask = useCallback((task: typeof tasks[0]) => {
+    editOutputs(task)
+  }, [])
+
+  const handleDeleteTask = useCallback((task: typeof tasks[0]) => {
     setConfirmDialog({
       title: '删除记录',
       message: '确定要删除这条记录吗？关联的图片资源也会被清理（如果没有其他任务引用）。',
       action: () => removeTask(task),
     })
-  }
+  }, [setConfirmDialog])
 
   const getPagePoint = (clientX: number, clientY: number) => ({
     pageX: clientX + window.scrollX,
     pageY: clientY + window.scrollY,
   })
+
+  const measureCardGeometries = () => {
+    if (!gridRef.current) return
+    const cards = gridRef.current.querySelectorAll('.task-card-wrapper')
+    const geometries: CardGeometry[] = []
+    cards.forEach((card) => {
+      const taskId = card.getAttribute('data-task-id')
+      if (!taskId) return
+      const rect = card.getBoundingClientRect()
+      geometries.push({
+        taskId,
+        rect: {
+          left: rect.left + window.scrollX,
+          top: rect.top + window.scrollY,
+          right: rect.right + window.scrollX,
+          bottom: rect.bottom + window.scrollY,
+        },
+      })
+    })
+    cardGeometriesRef.current = geometries
+  }
 
   const beginSelection = (target: HTMLElement, clientX: number, clientY: number, isCtrl: boolean) => {
     const point = getPagePoint(clientX, clientY)
@@ -72,6 +159,7 @@ export default function TaskGrid() {
     lastClientPoint.current = { x: clientX, y: clientY }
     document.body.classList.add('select-none')
     document.body.classList.add('drag-selecting')
+    measureCardGeometries()
     setSelectionBox({
       startPageX: point.pageX,
       startPageY: point.pageY,
@@ -84,40 +172,13 @@ export default function TaskGrid() {
     const start = dragStart.current
     if (!start || !gridRef.current) return
 
-    const minX = Math.min(start.pageX, pageX)
-    const maxX = Math.max(start.pageX, pageX)
-    const minY = Math.min(start.pageY, pageY)
-    const maxY = Math.max(start.pageY, pageY)
-
-    const cards = gridRef.current.querySelectorAll('.task-card-wrapper')
-    const newSelected = new Set(initialSelection.current)
-    const initialSelected = new Set(initialSelection.current)
-
-    cards.forEach((card) => {
-      const rect = card.getBoundingClientRect()
-      const taskId = card.getAttribute('data-task-id')
-      if (!taskId) return
-
-      const cardLeft = rect.left + window.scrollX
-      const cardRight = rect.right + window.scrollX
-      const cardTop = rect.top + window.scrollY
-      const cardBottom = rect.bottom + window.scrollY
-
-      const isIntersecting =
-        minX < cardRight && maxX > cardLeft && minY < cardBottom && maxY > cardTop
-
-      if (isIntersecting) {
-        if (initialSelected.has(taskId)) {
-          newSelected.delete(taskId)
-        } else {
-          newSelected.add(taskId)
-        }
-      } else if (!initialSelected.has(taskId)) {
-        newSelected.delete(taskId)
-      }
-    })
-
-    setSelectedTaskIds(Array.from(newSelected))
+    const rect = selectionBoxRect(start.pageX, start.pageY, pageX, pageY)
+    const newSelected = deriveSelection(
+      cardGeometriesRef.current,
+      rect,
+      initialSelection.current,
+    )
+    setSelectedTaskIds(newSelected)
   }
 
   useEffect(() => {
@@ -206,6 +267,22 @@ export default function TaskGrid() {
 
     const handleDocumentScroll = () => {
       if (!isDragging.current || !dragStart.current || !lastClientPoint.current || !hasDragged.current) return
+      measureCardGeometries()
+
+      const point = getPagePoint(lastClientPoint.current.x, lastClientPoint.current.y)
+      const start = dragStart.current
+      setSelectionBox({
+        startPageX: start.pageX,
+        startPageY: start.pageY,
+        currentPageX: point.pageX,
+        currentPageY: point.pageY,
+      })
+      updateSelectionFromPoint(point.pageX, point.pageY)
+    }
+
+    const handleResize = () => {
+      if (!isDragging.current || !dragStart.current || !lastClientPoint.current || !hasDragged.current) return
+      measureCardGeometries()
 
       const point = getPagePoint(lastClientPoint.current.x, lastClientPoint.current.y)
       const start = dragStart.current
@@ -245,6 +322,7 @@ export default function TaskGrid() {
     document.addEventListener('mouseup', handleDocumentMouseUp, true)
     document.addEventListener('wheel', handleDocumentWheel, { capture: true, passive: false })
     window.addEventListener('scroll', handleDocumentScroll, true)
+    window.addEventListener('resize', handleResize)
     return () => {
       stopDragScroll()
       document.removeEventListener('mousedown', handleDocumentMouseDown, true)
@@ -252,6 +330,7 @@ export default function TaskGrid() {
       document.removeEventListener('mouseup', handleDocumentMouseUp, true)
       document.removeEventListener('wheel', handleDocumentWheel, true)
       window.removeEventListener('scroll', handleDocumentScroll, true)
+      window.removeEventListener('resize', handleResize)
     }
   }, [clearSelection, isMac])
 
@@ -292,34 +371,35 @@ export default function TaskGrid() {
         {canvasImages.map((ci) => (
           <CanvasImageCard key={ci.id} canvasImage={ci} />
         ))}
-        {filteredTasks.map((task) => (
+        {visibleTasks.map((task) => (
           <div key={task.id} className="task-card-wrapper" data-task-id={task.id}>
             <TaskCard
               task={task}
-              onClick={(e) => {
-                if (Date.now() < suppressClickUntil.current) {
-                  e.preventDefault()
-                  return
-                }
-                suppressClickUntil.current = 0
-                const isCtrl = isMac ? e.metaKey : e.ctrlKey
-                if (isCtrl) {
-                  useStore.getState().toggleTaskSelection(task.id)
-                } else if (selectedTaskIds.length > 0) {
-                  clearSelection()
-                  setDetailTaskId(task.id)
-                } else {
-                  setDetailTaskId(task.id)
-                }
-              }}
-              onReuse={() => reuseConfig(task)}
-              onEditOutputs={() => editOutputs(task)}
-              onDelete={() => handleDelete(task)}
-              isSelected={selectedTaskIds.includes(task.id)}
+              onClick={handleCardClick}
+              onReuse={handleReuseTask}
+              onEditOutputs={handleEditOutputsTask}
+              onDelete={handleDeleteTask}
+              isSelected={selectedTaskIdSet.has(task.id)}
             />
           </div>
         ))}
       </div>
+      {hiddenTaskCount > 0 && (
+        <>
+          <div ref={sentinelRef} className="h-4" aria-hidden="true" />
+          <div className="flex justify-center py-6">
+            <button
+              onClick={() => setVisibleTaskWindow((current) => ({
+                key: visibleTaskFilterKey,
+                count: (current.key === visibleTaskFilterKey ? current.count : INITIAL_VISIBLE_TASKS) + VISIBLE_TASK_INCREMENT,
+              }))}
+              className="px-5 py-2 rounded-xl border border-gray-200/60 dark:border-white/[0.08] bg-white/50 dark:bg-white/[0.03] hover:bg-white dark:hover:bg-white/[0.06] text-sm text-gray-600 dark:text-gray-300 transition-all duration-200 shadow-sm"
+            >
+              再显示 {Math.min(VISIBLE_TASK_INCREMENT, hiddenTaskCount)} 条记录（剩余 {hiddenTaskCount} 条）
+            </button>
+          </div>
+        </>
+      )}
       {selectionBox && (
         <div
           className="fixed bg-blue-500/20 border border-blue-500/50 pointer-events-none z-[30]"
