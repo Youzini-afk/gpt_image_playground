@@ -216,19 +216,37 @@ describe('mask draft lifecycle in store actions', () => {
     expect(storageMock.adapter.getImage).not.toHaveBeenCalledWith('image-a')
   })
 
-  it('reuses an in-flight image load for concurrent cache misses', async () => {
+  it('allows full image fallback when a fresh thumbnail is missing', async () => {
+    const image = { id: 'fallback-image-a', dataUrl: 'data:image/png;base64,fallback' }
+    storageMock.adapter.getStoredFreshImageThumbnail.mockResolvedValue(undefined)
     storageMock.adapter.getImage.mockResolvedValue({
-      id: 'image-a',
-      dataUrl: imageA.dataUrl,
+      id: image.id,
+      dataUrl: image.dataUrl,
+    })
+
+    const thumbnail = await ensureImageThumbnailCached(image.id)
+    const fallback = await ensureImageCached(image.id)
+
+    expect(thumbnail).toBeUndefined()
+    expect(fallback).toBe(image.dataUrl)
+    expect(storageMock.adapter.getStoredFreshImageThumbnail).toHaveBeenCalledWith(image.id)
+    expect(storageMock.adapter.getImage).toHaveBeenCalledWith(image.id)
+  })
+
+  it('reuses an in-flight image load for concurrent cache misses', async () => {
+    const image = { id: 'concurrent-image-a', dataUrl: 'data:image/png;base64,concurrent' }
+    storageMock.adapter.getImage.mockResolvedValue({
+      id: image.id,
+      dataUrl: image.dataUrl,
     })
 
     const [first, second] = await Promise.all([
-      ensureImageCached('image-a'),
-      ensureImageCached('image-a'),
+      ensureImageCached(image.id),
+      ensureImageCached(image.id),
     ])
 
-    expect(first).toBe(imageA.dataUrl)
-    expect(second).toBe(imageA.dataUrl)
+    expect(first).toBe(image.dataUrl)
+    expect(second).toBe(image.dataUrl)
     expect(storageMock.adapter.getImage).toHaveBeenCalledTimes(1)
   })
 

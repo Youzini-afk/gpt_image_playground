@@ -44,6 +44,11 @@ function CanvasImageCard({ canvasImage }: { canvasImage: CanvasImage }) {
     ensureImageThumbnailCached(canvasImage.imageId).then((thumbnail) => {
       if (!cancelled && thumbnail) setThumbSrc(thumbnail.dataUrl)
     })
+    ensureImageCached(canvasImage.imageId).then((dataUrl) => {
+      if (!cancelled && dataUrl) setThumbSrc((current) => current || dataUrl)
+    }).catch(() => {
+      if (!cancelled) setThumbSrc('')
+    })
 
     return () => {
       cancelled = true

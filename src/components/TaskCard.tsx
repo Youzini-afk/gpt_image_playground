@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, memo } from 'react'
 import type { TaskRecord } from '../types'
-import { useStore, ensureImageThumbnailCached, subscribeImageThumbnail, updateTaskInStore, retryTask } from '../store'
+import { useStore, ensureImageCached, ensureImageThumbnailCached, subscribeImageThumbnail, updateTaskInStore, retryTask } from '../store'
 import { formatImageRatio } from '../lib/size'
 import { getParamDisplay, ActualValueBadge } from '../lib/paramDisplay'
 import { DEFAULT_IMAGES_MODEL, DEFAULT_FAL_MODEL } from '../lib/apiProfiles'
@@ -183,6 +183,11 @@ function TaskCard({
       ensureImageThumbnailCached(imageId).then((thumbnail) => {
         if (cancelled || !thumbnail) return
         applyThumbnail(thumbnail)
+      }).catch(() => {
+        if (!cancelled) setThumbSrc('')
+      })
+      ensureImageCached(imageId).then((dataUrl) => {
+        if (!cancelled && dataUrl) setThumbSrc((current) => current || dataUrl)
       }).catch(() => {
         if (!cancelled) setThumbSrc('')
       })
