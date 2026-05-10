@@ -7,7 +7,7 @@ Frontend business and infrastructure library. This directory contains API provid
 - Provider Strategy: `api.ts` selects OpenAI-compatible, fal.ai, or custom HTTP provider implementations based on `getActiveApiProfile(settings)` and `getCustomProviderDefinition()`.
 - Storage Adapter: `storage.ts` abstracts local IndexedDB and server REST storage behind a shared `StorageAdapter` interface for tasks, full images, image IDs, thumbnails, and canvas images.
 - Thumbnail Store: local mode keeps thumbnails in the `db.ts` object store; server mode stores them through `/api/storage/images/:id/thumbnail`, with freshness/version checks exposed by the storage adapter.
-- Compatibility Normalizers: `apiProfiles.ts`, `urlSettings.ts`, `paramCompatibility.ts`, `size.ts`, and `devProxy.ts` normalize old settings, URL imports, provider-specific limits, image dimensions, and proxy URLs before requests are made.
+- Compatibility Normalizers And Task Helpers: `apiProfiles.ts`, `urlSettings.ts`, `paramCompatibility.ts`, `size.ts`, `tasks.ts`, and `devProxy.ts` normalize old settings, URL imports, provider-specific limits, image dimensions, task filtering/search order, and proxy URLs before requests are made.
 - Canvas Utility Layer: Canvas/image/mask modules isolate browser image manipulation from React components.
 
 ## API Modules
@@ -20,15 +20,17 @@ Frontend business and infrastructure library. This directory contains API provid
 - `apiProfiles.ts`: Creates default OpenAI/fal profiles, normalizes legacy flat settings, validates and merges custom provider manifests, switches provider defaults, validates profiles, deduplicates imported profiles, and merges imported settings.
 - `urlSettings.ts`: Parses URL-driven settings/profile/custom provider payloads and converts them into normalized settings updates.
 - `paramCompatibility.ts`: Normalizes params for active provider/mode, removes unsupported settings such as OpenAI Codex CLI quality or fal auto values, and exposes output-count limits.
+- `tasks.ts`: Shared task filtering/search/sort helper used by task grid and batch-selection surfaces to keep visible list and bulk action semantics aligned.
 - `paramDisplay.tsx`: Renders requested and actual params with mismatch highlighting for task cards/details.
 - `size.ts`: Normalizes custom dimensions to safe image sizes, rounds to multiples of 16, clamps aspect ratio and pixel bounds, and formats ratios/tiers.
 
 ## Storage Modules
 - `storage.ts`: Runtime switch between `LocalStorageAdapter` and `ServerStorageAdapter`; owns image ID enumeration and thumbnail read/write methods; tests server storage through `/api/storage/ping`.
-- `db.ts`: IndexedDB wrapper for tasks, images, thumbnails, and canvasImages stores. Hashes image data URLs with SHA-256, stores thumbnail metadata separately, and deletes image/thumbnail records together.
+- `db.ts`: IndexedDB wrapper for tasks, images, thumbnails, and canvasImages stores. Caches the open database promise, hashes image data URLs with SHA-256, stores thumbnail metadata separately, and deletes image/thumbnail records together.
 
 ## Image, Mask, Canvas, And UI Utility Modules
-- `canvasImage.ts`: Loads images, reads dimensions, converts data URLs/blobs, exports canvas blobs, validates mask dimensions, and creates mask preview images.
+- `canvasImage.ts`: Loads images with `decoding="async"`, reads dimensions, converts data URLs/blobs, exports canvas blobs, validates mask dimensions, and creates mask preview images.
+- `selectionGeometry.ts`: Pure geometry helpers for drag-select rectangle intersection and selection derivation against cached card bounding boxes.
 - `mask.ts`: Orders mask-target images, classifies mask coverage, and asserts mask validity.
 - `maskPreprocess.ts`: Resizes large mask targets to a maximum edge of 1920 and dimensions divisible by 16, converts to PNG, and replaces the target input image with the working copy.
 - `viewportTransform.ts`: Pure pan/zoom/clamp math used by the mask editor.
@@ -46,7 +48,7 @@ Frontend business and infrastructure library. This directory contains API provid
 2. `api.ts` resolves the active profile and optional custom provider definition.
 3. OpenAI-compatible/custom profiles route to `openaiCompatibleImageApi.ts`; fal profiles route to `falAiImageApi.ts`.
 4. Provider clients normalize payloads, route through proxy when required, parse returned images to data URLs, and return `CallApiResult`.
-5. `store.ts` persists resulting images, schedules thumbnail work, and updates task metadata.
+5. `store.ts` persists resulting images, schedules thumbnail work, updates task metadata, and exposes a display-only object URL cache for full-image modal/lightbox rendering without changing persisted data URL storage.
 
 ## Storage Control Flow
 1. `initStorageMode()` in `store.ts` calls `testServerStorage()` when settings request server storage.
