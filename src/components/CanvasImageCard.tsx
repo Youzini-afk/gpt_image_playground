@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import type { CanvasImage } from '../types'
-import { useStore, getCachedImage, ensureImageCached, removeCanvasImage, addCanvasImageToInput } from '../store'
+import { useStore, ensureImageCached, ensureImageThumbnailCached, subscribeImageThumbnail, removeCanvasImage, addCanvasImageToInput } from '../store'
 import { copyBlobToClipboard, getClipboardFailureMessage } from '../lib/clipboard'
 
 export default function CanvasImageCard({ canvasImage }: { canvasImage: CanvasImage }) {
@@ -38,17 +38,16 @@ export default function CanvasImageCard({ canvasImage }: { canvasImage: CanvasIm
     setThumbSrc('')
     if (!shouldLoadThumb) return
 
-    const cached = getCachedImage(canvasImage.imageId)
-    if (cached) {
-      setThumbSrc(cached)
-    } else {
-      ensureImageCached(canvasImage.imageId).then((url) => {
-        if (!cancelled && url) setThumbSrc(url)
-      })
-    }
+    const unsubscribe = subscribeImageThumbnail(canvasImage.imageId, (thumbnail) => {
+      if (!cancelled) setThumbSrc(thumbnail.dataUrl)
+    })
+    ensureImageThumbnailCached(canvasImage.imageId).then((thumbnail) => {
+      if (!cancelled && thumbnail) setThumbSrc(thumbnail.dataUrl)
+    })
 
     return () => {
       cancelled = true
+      unsubscribe()
     }
   }, [canvasImage.imageId, shouldLoadThumb])
 
@@ -59,9 +58,13 @@ export default function CanvasImageCard({ canvasImage }: { canvasImage: CanvasIm
 
   const handleCopy = async () => {
     setMenuOpen(false)
-    if (!thumbSrc) return
     try {
-      const res = await fetch(thumbSrc)
+      const dataUrl = await ensureImageCached(canvasImage.imageId)
+      if (!dataUrl) {
+        showToast('图片数据已不存在', 'error')
+        return
+      }
+      const res = await fetch(dataUrl)
       const blob = await res.blob()
       await copyBlobToClipboard(blob)
       showToast('图片已复制', 'success')
@@ -72,9 +75,13 @@ export default function CanvasImageCard({ canvasImage }: { canvasImage: CanvasIm
 
   const handleDownload = async () => {
     setMenuOpen(false)
-    if (!thumbSrc) return
     try {
-      const res = await fetch(thumbSrc)
+      const dataUrl = await ensureImageCached(canvasImage.imageId)
+      if (!dataUrl) {
+        showToast('图片数据已不存在', 'error')
+        return
+      }
+      const res = await fetch(dataUrl)
       const blob = await res.blob()
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
@@ -127,7 +134,7 @@ export default function CanvasImageCard({ canvasImage }: { canvasImage: CanvasIm
             </div>
           )}
           <div className="absolute inset-0 bg-black/0 hover:bg-black/10 transition-colors" onClick={() => {
-            if (thumbSrc) setLightboxImageId(canvasImage.imageId, [canvasImage.imageId])
+            setLightboxImageId(canvasImage.imageId, [canvasImage.imageId])
           }} />
         </div>
         <div className="p-2 flex items-center justify-between gap-1" onClick={(e) => e.stopPropagation()}>
