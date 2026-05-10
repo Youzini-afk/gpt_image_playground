@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react'
+import { useEffect, useState, useRef, memo } from 'react'
 import type { TaskRecord } from '../types'
 import { useStore, ensureImageThumbnailCached, subscribeImageThumbnail, updateTaskInStore, retryTask } from '../store'
 import { formatImageRatio } from '../lib/size'
@@ -8,14 +8,14 @@ import { CodeIcon } from './icons'
 
 interface Props {
   task: TaskRecord
-  onReuse: () => void
-  onEditOutputs: () => void
-  onDelete: () => void
-  onClick: (e: React.MouseEvent | React.TouchEvent) => void
+  onReuse: (task: TaskRecord) => void
+  onEditOutputs: (task: TaskRecord) => void
+  onDelete: (task: TaskRecord) => void
+  onClick: (task: TaskRecord, e: React.MouseEvent | React.TouchEvent) => void
   isSelected?: boolean
 }
 
-export default function TaskCard({
+function TaskCard({
   task,
   onReuse,
   onEditOutputs,
@@ -32,7 +32,7 @@ export default function TaskCard({
   const [swipeStartedSelected, setSwipeStartedSelected] = useState(false)
   const [swipeActionActive, setSwipeActionActive] = useState(false)
   const toggleTaskSelection = useStore((s) => s.toggleTaskSelection)
-  const settings = useStore((s) => s.settings)
+  const alwaysShowRetryButton = useStore((s) => s.settings.alwaysShowRetryButton)
   const touchStartRef = useRef<{ x: number; y: number } | null>(null)
   const swipeResetTimerRef = useRef<number | null>(null)
   const suppressClickUntilRef = useRef(0)
@@ -158,8 +158,6 @@ export default function TaskCard({
     return () => clearInterval(id)
   }, [task.customRecoverable, task.falRecoverable, task.status])
 
-  const thumbImageId = task.outputImages?.[0] || ''
-
   // 加载缩略图
   useEffect(() => {
     let cancelled = false
@@ -273,7 +271,7 @@ export default function TaskCard({
             e.stopPropagation()
             return
           }
-          onClick(e)
+          onClick(task, e)
         }}
         onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}
@@ -362,6 +360,7 @@ export default function TaskCard({
                 data-image-id={task.outputImages[0]}
                 className="saveable-image w-full h-full object-cover"
                 loading="lazy"
+                decoding="async"
                 alt=""
               />
               {task.outputImages.length > 1 && (
@@ -491,7 +490,7 @@ export default function TaskCard({
               className="flex w-full items-center justify-between flex-shrink-0 mt-0.5 sm:w-auto sm:justify-end sm:gap-1"
               onClick={(e) => e.stopPropagation()}
             >
-              {((task.status === 'error' && !isFalReconnecting) || settings.alwaysShowRetryButton) && (
+              {((task.status === 'error' && !isFalReconnecting) || alwaysShowRetryButton) && (
                 <button
                   onClick={() => retryTask(task)}
                   className="p-1.5 rounded-md hover:bg-blue-50 dark:hover:bg-blue-950/30 text-gray-400 hover:text-blue-500 transition"
@@ -528,7 +527,7 @@ export default function TaskCard({
                 </svg>
               </button>
               <button
-                onClick={onReuse}
+                onClick={() => onReuse(task)}
                 className="p-1.5 rounded-md hover:bg-blue-50 dark:hover:bg-blue-950/30 text-gray-400 hover:text-blue-500 transition"
                 title="复用配置"
               >
@@ -547,7 +546,7 @@ export default function TaskCard({
                 </svg>
               </button>
               <button
-                onClick={onEditOutputs}
+                onClick={() => onEditOutputs(task)}
                 className="p-1.5 rounded-md hover:bg-green-50 dark:hover:bg-green-950/30 text-gray-400 hover:text-green-500 transition disabled:opacity-30"
                 title="编辑输出"
                 disabled={!task.outputImages?.length}
@@ -567,7 +566,7 @@ export default function TaskCard({
                 </svg>
               </button>
               <button
-                onClick={onDelete}
+                onClick={() => onDelete(task)}
                 className="p-1.5 rounded-md hover:bg-red-50 dark:hover:bg-red-950/30 text-gray-400 hover:text-red-500 transition"
                 title="删除记录"
               >
@@ -593,3 +592,5 @@ export default function TaskCard({
     </div>
   )
 }
+
+export default memo(TaskCard)

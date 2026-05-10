@@ -1,13 +1,13 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, memo } from 'react'
 import type { CanvasImage } from '../types'
 import { useStore, ensureImageCached, ensureImageThumbnailCached, subscribeImageThumbnail, removeCanvasImage, addCanvasImageToInput } from '../store'
 import { copyBlobToClipboard, getClipboardFailureMessage } from '../lib/clipboard'
 
-export default function CanvasImageCard({ canvasImage }: { canvasImage: CanvasImage }) {
+function CanvasImageCard({ canvasImage }: { canvasImage: CanvasImage }) {
   const [thumbSrc, setThumbSrc] = useState<string>('')
   const showToast = useStore((s) => s.showToast)
   const setLightboxImageId = useStore((s) => s.setLightboxImageId)
-  const inputImages = useStore((s) => s.inputImages)
+  const isInInput = useStore((s) => s.inputImages.some((i) => i.id === canvasImage.imageId))
   const [menuOpen, setMenuOpen] = useState(false)
   const cardRef = useRef<HTMLDivElement>(null)
   const [shouldLoadThumb, setShouldLoadThumb] = useState(false)
@@ -108,14 +108,12 @@ export default function CanvasImageCard({ canvasImage }: { canvasImage: CanvasIm
     removeCanvasImage(canvasImage)
   }
 
-  const isInInput = inputImages.some((i) => i.id === canvasImage.imageId)
-
   return (
     <div ref={cardRef} className="relative rounded-xl" onContextMenu={handleContextMenu}>
       <div className="relative bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-white/[0.08] overflow-hidden cursor-pointer hover:shadow-lg dark:hover:bg-gray-800/80 transition-[box-shadow,border-color,background-color]">
         <div className="w-full aspect-square bg-gray-100 dark:bg-black/20 relative flex items-center justify-center overflow-hidden">
           {thumbSrc ? (
-            <img src={thumbSrc} className="saveable-image w-full h-full object-cover" alt="" />
+            <img src={thumbSrc} className="saveable-image w-full h-full object-cover" loading="lazy" decoding="async" alt="" />
           ) : (
             <svg className="w-8 h-8 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
@@ -204,3 +202,5 @@ export default function CanvasImageCard({ canvasImage }: { canvasImage: CanvasIm
     </div>
   )
 }
+
+export default memo(CanvasImageCard)
