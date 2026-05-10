@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
-import { useStore, getCachedImage, ensureImageCached } from '../store'
+import { useStore, getCachedImage, ensureImageCached, retainImageDisplayUrl, releaseImageDisplayUrl } from '../store'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 import { usePreventBackgroundScroll } from '../hooks/usePreventBackgroundScroll'
 import { createMaskPreviewDataUrl } from '../lib/canvasImage'
@@ -20,6 +20,7 @@ export default function Lightbox() {
 
   const [src, setSrc] = useState('')
   const [srcImageId, setSrcImageId] = useState('')
+  const [maskTargetImageSrc, setMaskTargetImageSrc] = useState('')
   const [maskImageSrc, setMaskImageSrc] = useState('')
   const [maskPreviewSrc, setMaskPreviewSrc] = useState('')
   const [loading, setLoading] = useState(false)
@@ -44,37 +45,30 @@ export default function Lightbox() {
     setSrc('')
 
     const imageId = lightboxImageId
-    const cached = getCachedImage(imageId)
-    if (cached) {
-      setSrc(cached)
-      setSrcImageId(imageId)
-      setLoading(false)
-      setLoadFailed(false)
-    } else {
-      setSrcImageId('')
-      setLoading(true)
-      setLoadFailed(false)
-      ensureImageCached(imageId)
-        .then((url) => {
-          if (cancelled) return
-          if (url) {
-            setSrc(url)
-            setSrcImageId(imageId)
-            setLoadFailed(false)
-          } else {
-            setLoadFailed(true)
-          }
-        })
-        .catch(() => {
-          if (!cancelled) setLoadFailed(true)
-        })
-        .finally(() => {
-          if (!cancelled) setLoading(false)
-        })
-    }
+    setSrcImageId('')
+    setLoading(true)
+    setLoadFailed(false)
+    retainImageDisplayUrl(imageId)
+      .then((url) => {
+        if (cancelled) return
+        if (url) {
+          setSrc(url)
+          setSrcImageId(imageId)
+          setLoadFailed(false)
+        } else {
+          setLoadFailed(true)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setLoadFailed(true)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
 
     return () => {
       cancelled = true
+      releaseImageDisplayUrl(imageId)
     }
   }, [lightboxImageId])
 
@@ -83,13 +77,29 @@ export default function Lightbox() {
     let cancelled = false
     if (!lightboxImageId) {
       setMaskImageSrc('')
+      setMaskTargetImageSrc('')
       return
     }
 
     setMaskImageSrc('')
+    setMaskTargetImageSrc('')
+    const loadMaskTargetImage = () => {
+      const cached = getCachedImage(lightboxImageId)
+      if (cached) {
+        setMaskTargetImageSrc(cached)
+        return
+      }
+      ensureImageCached(lightboxImageId).then((url) => {
+        if (!cancelled && url) setMaskTargetImageSrc(url)
+      })
+    }
+
     if (maskDraft?.targetImageId === lightboxImageId) {
       setMaskImageSrc(maskDraft.maskDataUrl)
-      return
+      loadMaskTargetImage()
+      return () => {
+        cancelled = true
+      }
     }
 
     setMaskImageSrc('')
@@ -105,6 +115,7 @@ export default function Lightbox() {
           if (!cancelled && url) setMaskImageSrc(url)
         })
       }
+      loadMaskTargetImage()
     } else {
       setMaskImageSrc('')
     }
@@ -117,12 +128,12 @@ export default function Lightbox() {
   // 生成遮罩预览
   useEffect(() => {
     let cancelled = false
-    if (!src || !maskImageSrc) {
+    if (!maskTargetImageSrc || !maskImageSrc) {
       setMaskPreviewSrc('')
       return
     }
 
-    createMaskPreviewDataUrl(src, maskImageSrc)
+    createMaskPreviewDataUrl(maskTargetImageSrc, maskImageSrc)
       .then((url) => {
         if (!cancelled) setMaskPreviewSrc(url)
       })
@@ -133,7 +144,7 @@ export default function Lightbox() {
     return () => {
       cancelled = true
     }
-  }, [src, maskImageSrc])
+  }, [maskTargetImageSrc, maskImageSrc])
 
   // 导航
   const currentIndex = lightboxImageId ? lightboxImageList.indexOf(lightboxImageId) : -1
@@ -545,12 +556,15 @@ function LightboxInner({ src, imageId, maskPreviewSrc, onClose, showNav, current
             data-image-id={imageId}
             className="saveable-image max-w-[85vw] max-h-[85vh] object-contain rounded-lg shadow-2xl"
             onDragStart={(e) => e.preventDefault()}
+            decoding="async"
+            loading="eager"
             alt=""
           />
           {maskPreviewSrc && (
             <img
               src={maskPreviewSrc}
               className="absolute inset-0 w-full h-full object-contain rounded-lg pointer-events-none"
+              decoding="async"
               alt=""
             />
           )}

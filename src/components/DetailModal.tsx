@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, useRef } from 'react'
-import { useStore, getCachedImage, ensureImageCached, reuseConfig, editOutputs, removeTask, updateTaskInStore, showCodexCliPrompt, getCodexCliPromptKey, retryTask, addImageToCanvas } from '../store'
+import { useStore, getCachedImage, ensureImageCached, retainImageDisplayUrl, releaseImageDisplayUrl, reuseConfig, editOutputs, removeTask, updateTaskInStore, showCodexCliPrompt, getCodexCliPromptKey, retryTask, addImageToCanvas } from '../store'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 import { usePreventBackgroundScroll } from '../hooks/usePreventBackgroundScroll'
 import { useTooltip } from '../hooks/useTooltip'
@@ -17,7 +17,6 @@ export default function DetailModal() {
   const detailTaskId = useStore((s) => s.detailTaskId)
   const setDetailTaskId = useStore((s) => s.setDetailTaskId)
   const setLightboxImageId = useStore((s) => s.setLightboxImageId)
-  const setMaskEditorImageId = useStore((s) => s.setMaskEditorImageId)
   const setConfirmDialog = useStore((s) => s.setConfirmDialog)
   const showToast = useStore((s) => s.showToast)
   const settings = useStore((s) => s.settings)
@@ -123,21 +122,17 @@ export default function DetailModal() {
       if (!cancelled) setOutputPreviewSrcs({ [currentOutputImageId]: dataUrl })
     }
 
-    const cached = getCachedImage(currentOutputImageId)
-    if (cached) {
-      setOutputImage(cached)
-    } else {
-      ensureImageCached(currentOutputImageId)
-        .then((dataUrl) => {
-          if (dataUrl) setOutputImage(dataUrl)
-        })
-        .catch(() => {
-          if (!cancelled) setOutputPreviewSrcs({})
-        })
-    }
+    retainImageDisplayUrl(currentOutputImageId)
+      .then((displayUrl) => {
+        if (displayUrl) setOutputImage(displayUrl)
+      })
+      .catch(() => {
+        if (!cancelled) setOutputPreviewSrcs({})
+      })
 
     return () => {
       cancelled = true
+      releaseImageDisplayUrl(currentOutputImageId)
     }
   }, [currentOutputImageId])
 
@@ -225,13 +220,6 @@ export default function DetailModal() {
     setDetailTaskId(null)
   }
 
-  const handleMaskEditCurrentOutput = () => {
-    const imgId = task.outputImages?.[imageIndex]
-    if (!imgId) return
-    setMaskEditorImageId(imgId)
-    setDetailTaskId(null)
-  }
-
   const handleDelete = () => {
     setDetailTaskId(null)
     setConfirmDialog({
@@ -292,13 +280,21 @@ export default function DetailModal() {
     setDetailTaskId(null)
   }
 
-  const handleAddToCanvas = () => {
+  const handleAddToCanvas = async () => {
     if (!task.outputImages?.[imageIndex]) return
     const imgId = task.outputImages[imageIndex]
-    const src = imageSrcs[imgId]
-    if (!src) return
-    addImageToCanvas(src).catch(() => {})
-    showToast('已添加到工作台', 'success')
+    try {
+      const src = await ensureImageCached(imgId)
+      if (!src) {
+        showToast('图片数据已不存在', 'error')
+        return
+      }
+      await addImageToCanvas(src)
+      showToast('已添加到工作台', 'success')
+    } catch (err) {
+      console.error(err)
+      showToast('添加到工作台失败', 'error')
+    }
   }
 
   return (
@@ -355,6 +351,8 @@ export default function DetailModal() {
                 onClick={() =>
                   setLightboxImageId(task.outputImages[imageIndex], task.outputImages)
                 }
+                decoding="async"
+                loading="eager"
                 alt=""
               />
               <div data-selectable-text className="absolute top-[15px] flex items-center gap-1.5" style={{ left: imageLabelLeft }}>
@@ -453,7 +451,7 @@ export default function DetailModal() {
                   <button
                     type="button"
                     {...copyErrorTooltip.handlers}
-                    onClick={(e) => {
+                    onClick={() => {
                       copyErrorTooltip.handlers.onClick()
                       handleCopyError()
                     }}
@@ -471,7 +469,7 @@ export default function DetailModal() {
                     <button
                       type="button"
                       {...viewRawResponseTooltip.handlers}
-                      onClick={(e) => {
+                      onClick={() => {
                         dismissAllTooltips()
                         setShowRawResponseModal(true)
                       }}
@@ -490,7 +488,7 @@ export default function DetailModal() {
                     <button
                       type="button"
                       {...copyRawUrlsTooltip.handlers}
-                      onClick={async (e) => {
+                      onClick={async () => {
                         if (task.rawImageUrls!.length === 1) {
                           copyRawUrlsTooltip.handlers.onClick()
                           try {
@@ -518,7 +516,7 @@ export default function DetailModal() {
                   <button
                     type="button"
                     {...retryTooltip.handlers}
-                    onClick={(e) => {
+                    onClick={() => {
                       retryTooltip.handlers.onClick()
                       handleRetry()
                     }}
@@ -619,6 +617,8 @@ export default function DetailModal() {
                               src={displaySrc}
                               data-image-id={imgId}
                               className="w-full h-full object-cover"
+                              decoding="async"
+                              loading="lazy"
                               alt=""
                             />
                           )}

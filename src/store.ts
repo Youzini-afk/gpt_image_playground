@@ -34,6 +34,13 @@ import { zipSync, unzipSync, strToU8, strFromU8 } from 'fflate'
 
 const imageCache = new Map<string, string>()
 const imageLoadPromises = new Map<string, Promise<string | undefined>>()
+type ImageDisplayUrlEntry = { url: string; objectUrl: boolean; retainCount: number }
+
+const imageDisplayUrlCache = new Map<string, ImageDisplayUrlEntry>()
+const imageDisplayUrlLoadPromises = new Map<string, Promise<string | undefined>>()
+const imageDisplayUrlVersions = new Map<string, number>()
+const imageDisplayUrlRetains = new Map<string, number>()
+let imageDisplayUrlEpoch = 0
 const persistedImageIds = new Set<string>()
 const thumbnailCache = new Map<string, { dataUrl: string; width?: number; height?: number; thumbnailVersion?: number }>()
 const thumbnailBackfillIds = new Map<string, 'visible' | 'background'>()
@@ -41,6 +48,7 @@ const thumbnailBackfillRunningIds = new Set<string>()
 const thumbnailSubscribers = new Map<string, Set<(thumbnail: { dataUrl: string; width?: number; height?: number }) => void>>()
 let thumbnailBackfillScheduled = false
 const MAX_IMAGE_CACHE_ENTRIES = 8
+const MAX_IMAGE_DISPLAY_URL_CACHE_ENTRIES = 8
 const MAX_THUMBNAIL_CACHE_ENTRIES = 80
 const MAX_THUMBNAIL_BACKFILL_CONCURRENT = 4
 const INITIAL_THUMBNAIL_BACKFILL_LIMIT = 12
@@ -129,13 +137,16 @@ async function putImage(image: StoredImage) {
 async function deleteImage(id: string) {
   await getStorage().deleteImage(id)
   persistedImageIds.delete(id)
+  evictImageDisplayUrl(id)
   thumbnailCache.delete(id)
   thumbnailBackfillIds.delete(id)
 }
 
 async function clearImages() {
   await getStorage().clearImages()
+  imageCache.clear()
   imageLoadPromises.clear()
+  clearImageDisplayUrlCache()
   persistedImageIds.clear()
   thumbnailCache.clear()
   thumbnailBackfillIds.clear()
@@ -206,6 +217,158 @@ function cacheImage(id: string, dataUrl: string) {
     if (oldestKey == null) break
     imageCache.delete(oldestKey)
   }
+}
+
+export function getCachedImageDisplayUrl(id: string): string | undefined {
+  const entry = imageDisplayUrlCache.get(id)
+  if (entry) {
+    imageDisplayUrlCache.delete(id)
+    imageDisplayUrlCache.set(id, entry)
+    return entry.url
+  }
+  return undefined
+}
+
+function revokeImageDisplayUrl(entry: { url: string; objectUrl: boolean }) {
+  if (entry.objectUrl && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+    URL.revokeObjectURL(entry.url)
+  }
+}
+
+function nextImageDisplayUrlVersion(id: string) {
+  const version = (imageDisplayUrlVersions.get(id) ?? 0) + 1
+  imageDisplayUrlVersions.set(id, version)
+  return version
+}
+
+function currentImageDisplayUrlVersion(id: string) {
+  return imageDisplayUrlVersions.get(id) ?? 0
+}
+
+function cacheImageDisplayUrl(id: string, entry: { url: string; objectUrl: boolean }) {
+  const existing = imageDisplayUrlCache.get(id)
+  if (existing && existing.url !== entry.url) revokeImageDisplayUrl(existing)
+  imageDisplayUrlCache.delete(id)
+  imageDisplayUrlCache.set(id, { ...entry, retainCount: imageDisplayUrlRetains.get(id) ?? existing?.retainCount ?? 0 })
+  while (imageDisplayUrlCache.size > MAX_IMAGE_DISPLAY_URL_CACHE_ENTRIES) {
+    const oldestKey = Array.from(imageDisplayUrlCache.entries()).find(([, cached]) => cached.retainCount === 0)?.[0]
+    if (oldestKey == null) break
+    const oldest = imageDisplayUrlCache.get(oldestKey)
+    if (oldest) revokeImageDisplayUrl(oldest)
+    imageDisplayUrlCache.delete(oldestKey)
+  }
+}
+
+export function releaseImageDisplayUrl(id: string) {
+  const retains = imageDisplayUrlRetains.get(id) ?? 0
+  if (retains > 1) {
+    const nextRetains = retains - 1
+    imageDisplayUrlRetains.set(id, nextRetains)
+    const entry = imageDisplayUrlCache.get(id)
+    if (entry) entry.retainCount = nextRetains
+    return
+  }
+  if (retains === 1) {
+    imageDisplayUrlRetains.delete(id)
+    const entry = imageDisplayUrlCache.get(id)
+    if (entry) {
+      entry.retainCount = 0
+      imageDisplayUrlCache.delete(id)
+      imageDisplayUrlCache.set(id, entry)
+    } else {
+      nextImageDisplayUrlVersion(id)
+      imageDisplayUrlLoadPromises.delete(id)
+    }
+    return
+  }
+
+  const entry = imageDisplayUrlCache.get(id)
+  if (!entry) {
+    if (imageDisplayUrlLoadPromises.has(id)) evictImageDisplayUrl(id)
+    return
+  }
+  evictImageDisplayUrl(id)
+}
+
+function evictImageDisplayUrl(id: string) {
+  nextImageDisplayUrlVersion(id)
+  imageDisplayUrlLoadPromises.delete(id)
+  imageDisplayUrlRetains.delete(id)
+  const entry = imageDisplayUrlCache.get(id)
+  if (!entry) return
+  revokeImageDisplayUrl(entry)
+  imageDisplayUrlCache.delete(id)
+}
+
+function clearImageDisplayUrlCache() {
+  imageDisplayUrlEpoch += 1
+  for (const entry of imageDisplayUrlCache.values()) revokeImageDisplayUrl(entry)
+  imageDisplayUrlCache.clear()
+  imageDisplayUrlLoadPromises.clear()
+  imageDisplayUrlVersions.clear()
+  imageDisplayUrlRetains.clear()
+}
+
+async function createImageDisplayUrl(dataUrl: string) {
+  if (
+    typeof URL === 'undefined' ||
+    typeof URL.createObjectURL !== 'function' ||
+    typeof Blob === 'undefined' ||
+    typeof fetch !== 'function'
+  ) {
+    return { url: dataUrl, objectUrl: false }
+  }
+
+  const response = await fetch(dataUrl)
+  const blob = await response.blob()
+  return { url: URL.createObjectURL(blob), objectUrl: true }
+}
+
+async function getImageDataUrlForDisplay(id: string) {
+  const cached = getCachedImage(id)
+  if (cached) return cached
+  const existingLoad = imageLoadPromises.get(id)
+  if (existingLoad) return existingLoad
+  const rec = await getImage(id)
+  if (!rec) return undefined
+  persistedImageIds.add(rec.id)
+  return rec.dataUrl
+}
+
+export async function ensureImageDisplayUrlCached(id: string): Promise<string | undefined> {
+  const cached = getCachedImageDisplayUrl(id)
+  if (cached) return cached
+  const existingLoad = imageDisplayUrlLoadPromises.get(id)
+  if (existingLoad) return existingLoad
+
+  const epoch = imageDisplayUrlEpoch
+  const version = nextImageDisplayUrlVersion(id)
+  const load = getImageDataUrlForDisplay(id)
+    .then(async (dataUrl) => {
+      if (!dataUrl) return undefined
+      const entry = await createImageDisplayUrl(dataUrl)
+      if (epoch !== imageDisplayUrlEpoch || version !== currentImageDisplayUrlVersion(id)) {
+        revokeImageDisplayUrl(entry)
+        return undefined
+      }
+      cacheImageDisplayUrl(id, entry)
+      return entry.url
+    })
+    .finally(() => {
+      if (imageDisplayUrlLoadPromises.get(id) === load) imageDisplayUrlLoadPromises.delete(id)
+    })
+  imageDisplayUrlLoadPromises.set(id, load)
+  return load
+}
+
+export async function retainImageDisplayUrl(id: string): Promise<string | undefined> {
+  const retainCount = (imageDisplayUrlRetains.get(id) ?? 0) + 1
+  imageDisplayUrlRetains.set(id, retainCount)
+  const cachedEntry = imageDisplayUrlCache.get(id)
+  if (cachedEntry) cachedEntry.retainCount = retainCount
+  const url = await ensureImageDisplayUrlCached(id)
+  if (!url) releaseImageDisplayUrl(id)
+  return url
 }
 
 function getCachedThumbnail(id: string) {
@@ -498,7 +661,7 @@ interface AppState {
 
 export const useStore = create<AppState>()(
   persist(
-    (set, get) => ({
+    (set) => ({
       // Settings
       settings: { ...DEFAULT_SETTINGS },
       setSettings: (s) => set((st) => {
@@ -747,6 +910,7 @@ export async function switchStorageMode(mode: 'local' | 'server') {
   setStorageMode(mode)
   imageCache.clear()
   imageLoadPromises.clear()
+  clearImageDisplayUrlCache()
   persistedImageIds.clear()
   thumbnailCache.clear()
   thumbnailBackfillIds.clear()
@@ -1054,6 +1218,7 @@ async function readImageSizeParam(dataUrl: string): Promise<Partial<TaskParams> 
       }
     }
     image.onerror = () => finish(undefined)
+    image.decoding = 'async'
     image.src = dataUrl
     if (image.complete && image.naturalWidth > 0 && image.naturalHeight > 0) {
       finish({ size: `${image.naturalWidth}x${image.naturalHeight}` })
@@ -1698,7 +1863,7 @@ export async function editOutputs(task: TaskRecord) {
 
 /** 删除多条任务 */
 export async function removeMultipleTasks(taskIds: string[]) {
-  const { tasks, setTasks, inputImages, canvasImages, showToast, clearSelection, selectedTaskIds } = useStore.getState()
+  const { tasks, setTasks, inputImages, canvasImages, showToast, selectedTaskIds } = useStore.getState()
   
   if (!taskIds.length) return
 
@@ -2119,6 +2284,7 @@ function loadThumbnailImage(dataUrl: string): Promise<HTMLImageElement> {
     const image = new Image()
     image.onload = () => resolve(image)
     image.onerror = () => reject(new Error('图片加载失败'))
+    image.decoding = 'async'
     image.src = dataUrl
   })
 }

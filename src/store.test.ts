@@ -39,9 +39,16 @@ vi.mock('./lib/storage', () => ({
   testServerStorage: storageMock.testServerStorage,
 }))
 
-import { editOutputs, ensureImageCached, ensureImageThumbnailCached, getPersistedState, getTaskApiProfile, initStore, markInterruptedOpenAIRunningTasks, reuseConfig, submitTask, useStore } from './store'
+import { editOutputs, ensureImageCached, ensureImageDisplayUrlCached, ensureImageThumbnailCached, getCachedImageDisplayUrl, getPersistedState, getTaskApiProfile, initStore, markInterruptedOpenAIRunningTasks, releaseImageDisplayUrl, retainImageDisplayUrl, reuseConfig, submitTask, useStore } from './store'
 
 const imageA = { id: 'image-a', dataUrl: 'data:image/png;base64,a' }
+
+async function waitForCondition(condition: () => boolean) {
+  for (let index = 0; index < 20; index++) {
+    if (condition()) return
+    await Promise.resolve()
+  }
+}
 
 function task(overrides: Partial<TaskRecord> = {}): TaskRecord {
   return {
@@ -223,6 +230,160 @@ describe('mask draft lifecycle in store actions', () => {
     expect(first).toBe(imageA.dataUrl)
     expect(second).toBe(imageA.dataUrl)
     expect(storageMock.adapter.getImage).toHaveBeenCalledTimes(1)
+  })
+
+  it('caches full image display URLs without changing the data URL cache API', async () => {
+    const image = { id: 'display-image-a', dataUrl: 'data:image/png;base64,display-a' }
+    const createObjectURL = vi.fn(() => 'blob:image-a')
+    const revokeObjectURL = vi.fn()
+    vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new Blob(['image'], { type: 'image/png' }))))
+    storageMock.adapter.getImage.mockResolvedValue({ id: image.id, dataUrl: image.dataUrl })
+
+    try {
+      const first = await ensureImageDisplayUrlCached(image.id)
+      const second = await ensureImageDisplayUrlCached(image.id)
+
+      expect(first).toBe('blob:image-a')
+      expect(second).toBe('blob:image-a')
+      expect(getCachedImageDisplayUrl(image.id)).toBe('blob:image-a')
+      expect(createObjectURL).toHaveBeenCalledTimes(1)
+      expect(await ensureImageCached(image.id)).toBe(image.dataUrl)
+    } finally {
+      releaseImageDisplayUrl(image.id)
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('reuses in-flight display URL loads and revokes on explicit release', async () => {
+    const image = { id: 'display-image-b', dataUrl: 'data:image/png;base64,display-b' }
+    const createObjectURL = vi.fn(() => 'blob:image-a')
+    const revokeObjectURL = vi.fn()
+    vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new Blob(['image'], { type: 'image/png' }))))
+    storageMock.adapter.getImage.mockResolvedValue({ id: image.id, dataUrl: image.dataUrl })
+
+    try {
+      const [first, second] = await Promise.all([
+        ensureImageDisplayUrlCached(image.id),
+        ensureImageDisplayUrlCached(image.id),
+      ])
+
+      expect(first).toBe('blob:image-a')
+      expect(second).toBe('blob:image-a')
+      expect(createObjectURL).toHaveBeenCalledTimes(1)
+
+      releaseImageDisplayUrl(image.id)
+
+      expect(revokeObjectURL).toHaveBeenCalledWith('blob:image-a')
+      expect(getCachedImageDisplayUrl(image.id)).toBeUndefined()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('evicts the oldest display URLs from the LRU cache', async () => {
+    let nextObjectUrl = 0
+    const createObjectURL = vi.fn(() => `blob:image-${nextObjectUrl++}`)
+    const revokeObjectURL = vi.fn()
+    vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL })
+    vi.stubGlobal('fetch', vi.fn(async (dataUrl: string) => ({
+      blob: async () => new Blob(['image'], { type: dataUrl.slice('data:image/'.length, dataUrl.indexOf(';')) }),
+    })))
+    storageMock.adapter.getImage.mockImplementation(async (id: string) => ({
+      id,
+      dataUrl: `data:image/${id};base64,a`,
+    }))
+
+    try {
+      for (let index = 0; index < 9; index++) {
+        await ensureImageDisplayUrlCached(`image-${index}`)
+      }
+
+      expect(getCachedImageDisplayUrl('image-0')).toBeUndefined()
+      expect(getCachedImageDisplayUrl('image-8')).toBe('blob:image-8')
+      expect(revokeObjectURL).toHaveBeenCalledWith('blob:image-0')
+    } finally {
+      for (let index = 0; index < 9; index++) releaseImageDisplayUrl(`image-${index}`)
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('does not evict retained display URLs from the LRU cache', async () => {
+    let nextObjectUrl = 0
+    const createObjectURL = vi.fn(() => `blob:retained-${nextObjectUrl++}`)
+    const revokeObjectURL = vi.fn()
+    vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL })
+    vi.stubGlobal('fetch', vi.fn(async (dataUrl: string) => ({
+      blob: async () => new Blob(['image'], { type: dataUrl.slice('data:image/'.length, dataUrl.indexOf(';')) }),
+    })))
+    storageMock.adapter.getImage.mockImplementation(async (id: string) => ({
+      id,
+      dataUrl: `data:image/${id};base64,a`,
+    }))
+
+    try {
+      const retained = await retainImageDisplayUrl('retained-image')
+      for (let index = 0; index < 8; index++) {
+        await ensureImageDisplayUrlCached(`overflow-${index}`)
+      }
+
+      expect(getCachedImageDisplayUrl('retained-image')).toBe(retained)
+      expect(revokeObjectURL).not.toHaveBeenCalledWith(retained)
+      expect(getCachedImageDisplayUrl('overflow-0')).toBeUndefined()
+    } finally {
+      releaseImageDisplayUrl('retained-image')
+      for (let index = 0; index < 8; index++) releaseImageDisplayUrl(`overflow-${index}`)
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('invalidates pending retained display URL loads after release', async () => {
+    const createObjectURL = vi.fn(() => 'blob:late-release')
+    const revokeObjectURL = vi.fn()
+    let resolveBlob!: (blob: Blob) => void
+    vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL })
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      blob: () => new Promise<Blob>((resolve) => { resolveBlob = resolve }),
+    })))
+    storageMock.adapter.getImage.mockResolvedValue({ id: 'late-release-image', dataUrl: 'data:image/png;base64,late' })
+
+    try {
+      const pending = retainImageDisplayUrl('late-release-image')
+      await waitForCondition(() => typeof resolveBlob === 'function')
+      releaseImageDisplayUrl('late-release-image')
+      resolveBlob(new Blob(['image'], { type: 'image/png' }))
+
+      await expect(pending).resolves.toBeUndefined()
+      expect(revokeObjectURL).toHaveBeenCalledWith('blob:late-release')
+      expect(getCachedImageDisplayUrl('late-release-image')).toBeUndefined()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('does not re-cache pending display URL loads after clearing the display cache', async () => {
+    const createObjectURL = vi.fn(() => 'blob:late-clear')
+    const revokeObjectURL = vi.fn()
+    let resolveBlob!: (blob: Blob) => void
+    vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL })
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      blob: () => new Promise<Blob>((resolve) => { resolveBlob = resolve }),
+    })))
+    storageMock.adapter.getImage.mockResolvedValue({ id: 'late-clear-image', dataUrl: 'data:image/png;base64,late' })
+
+    try {
+      const pending = ensureImageDisplayUrlCached('late-clear-image')
+      await waitForCondition(() => typeof resolveBlob === 'function')
+      releaseImageDisplayUrl('late-clear-image')
+      resolveBlob(new Blob(['image'], { type: 'image/png' }))
+
+      await expect(pending).resolves.toBeUndefined()
+      expect(revokeObjectURL).toHaveBeenCalledWith('blob:late-clear')
+      expect(getCachedImageDisplayUrl('late-clear-image')).toBeUndefined()
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })
 

@@ -21,7 +21,7 @@ export default function ImageContextMenu() {
         const imgTarget = target as HTMLImageElement
         if (!imgTarget.src) return
 
-        const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+        const isIOS = /iPad|iPhone|iPod|Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1
         const isTouch = window.matchMedia('(pointer: coarse)').matches
         if (isIOS && isTouch) return
 
@@ -120,7 +120,8 @@ export default function ImageContextMenu() {
     }
 
     try {
-      await addImageFromUrl(menuInfo.src)
+      const src = await getOriginalImageSrc()
+      await addImageFromUrl(src)
       setDetailTaskId(null)
       setLightboxImageId(null)
       setMaskEditorImageId(null)
@@ -135,7 +136,8 @@ export default function ImageContextMenu() {
     e.stopPropagation()
     setMenuInfo(null)
     try {
-      await addImageToCanvas(menuInfo.src)
+      const src = await getOriginalImageSrc()
+      await addImageToCanvas(src)
       showToast('已添加到工作台', 'success')
     } catch (err) {
       console.error(err)
