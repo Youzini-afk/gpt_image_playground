@@ -1,19 +1,19 @@
 # src/
 
 ## Responsibility
-React frontend application layer for GPT Image Playground. This directory owns browser bootstrapping, the Zustand application store, domain types, global styles, UI composition, local/server storage orchestration, image-generation workflows, thumbnail cache/backfill, URL settings bootstrap, and custom provider configuration.
+React frontend application layer for GPT Image Playground. This directory owns browser bootstrapping, the Zustand application store, domain types, global styles, UI composition, local/server storage orchestration, image-generation workflows, Agent/Responses workflows, thumbnail cache/backfill, URL settings bootstrap, and custom provider configuration.
 
 ## Entry Points
 - `main.tsx`: React 19 StrictMode entry point. Installs mobile viewport guards from `lib/viewport` before rendering `App`.
-- `App.tsx`: Root shell composer. Mounts Header, SearchBar, TaskGrid, InputBar, DetailModal, Lightbox, SettingsModal, ConfirmDialog, Toast, MaskEditorModal, and ImageContextMenu; also applies URL settings and storage initialization.
-- `store.ts`: Single application state and async workflow coordinator for tasks, images, thumbnails, storage, recovery, import/export, and UI global state.
-- `types.ts`: Domain contracts for API/custom providers, settings, task params, tasks, stored images/thumbnails, canvas images, API payloads, and export manifests.
+- `App.tsx`: Root shell composer. Mounts Header, SearchBar, TaskGrid, AgentWorkspace, InputBar, DetailModal, Lightbox, SettingsModal, ConfirmDialog, Toast, MaskEditorModal, and ImageContextMenu; also applies URL settings and storage initialization.
+- `store.ts`: Single application state and async workflow coordinator for tasks, Agent conversations, images, thumbnails, storage, recovery, import/export, and UI global state.
+- `types.ts`: Domain contracts for API/custom providers, Agent conversations, Responses API payloads, settings, task params, tasks, stored images/thumbnails, canvas images, API payloads, and export manifests.
 - `index.css`: Tailwind imports and global styles.
 
 ## Design
 - State Container Pattern: `store.ts` uses Zustand with persist middleware. Persisted state keeps settings, generation params, prompt, input image IDs, stripped input image metadata, dismissed prompts, and UI preferences.
 - Adapter Pattern: `lib/storage.ts` switches between IndexedDB-backed `LocalStorageAdapter` and REST-backed `ServerStorageAdapter` without changing store callers.
-- Provider Strategy: `lib/api.ts` dispatches to OpenAI-compatible, fal.ai, or custom HTTP provider clients based on the active API profile/custom provider definition.
+- Provider Strategy: `lib/api.ts` dispatches to OpenAI-compatible, fal.ai, or custom HTTP provider clients based on the active API profile/custom provider definition; Agent mode routes through OpenAI Responses helpers in `lib/agentApi.ts`.
 - Thumbnail Split: full image data stays in image storage/cache; thumbnails live behind the storage adapter, using IndexedDB locally and server SQLite in server mode, then are cached/backfilled lazily for visible/background images.
 - Portal/Overlay UI Shell: App-level modals and global menus are mounted once at the root and driven by store state.
 
@@ -32,6 +32,13 @@ React frontend application layer for GPT Image Playground. This directory owns b
 4. Provider calls return generated image data URLs or raw image URLs plus actual params/revised prompts.
 5. Output images are stored by hash, thumbnails are generated/backfilled, task status is updated, and card/detail views receive lightweight preview data.
 6. fal.ai and custom async provider tasks can be marked recoverable and polled after interruptions/restarts.
+
+## Agent Generation Flow
+1. `AgentWorkspace` and `InputBar` collect Agent prompts, uploaded references, and `@` image mentions.
+2. `submitAgentMessage()` creates a conversation round, stores input/mask images, and builds Responses API input with current and generated image refs.
+3. `executeAgentRound()` calls `callAgentResponsesApi()`, streams text/image partials when enabled, and handles `generate_image_batch` tool calls.
+4. Batch image tool calls pre-create task cards, resolve both current-input and generated refs, mark per-item failures as task errors, and continue the Responses loop with function outputs.
+5. Agent conversations, drafts, response output, generated tasks, thumbnails, canvas images, and server/local storage boundaries are preserved in import/export and cleanup paths.
 
 ## Data Flow
 - UI reads/writes reactive state through `useStore` selectors.

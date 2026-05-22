@@ -1,7 +1,7 @@
 # src/lib/
 
 ## Responsibility
-Frontend business and infrastructure library. This directory contains API provider clients, custom provider manifest handling, settings/profile normalization, storage adapters, IndexedDB/thumbnail access, image/canvas/mask utilities, parameter compatibility, URL setting normalization, runtime proxy helpers, clipboard helpers, dropdown/tooltip utilities, and viewport utilities.
+Frontend business and infrastructure library. This directory contains API provider clients, Agent/Responses helpers, custom provider manifest handling, settings/profile normalization, storage adapters, IndexedDB/thumbnail access, image/canvas/mask utilities, parameter compatibility, URL setting normalization, runtime proxy helpers, clipboard/download helpers, dropdown/tooltip utilities, and viewport utilities.
 
 ## Design
 - Provider Strategy: `api.ts` selects OpenAI-compatible, fal.ai, or custom HTTP provider implementations based on `getActiveApiProfile(settings)` and `getCustomProviderDefinition()`.
@@ -12,6 +12,9 @@ Frontend business and infrastructure library. This directory contains API provid
 
 ## API Modules
 - `api.ts`: Dispatch layer exporting `callImageApi()` and `normalizeBaseUrl`.
+- `agentApi.ts`: OpenAI Responses Agent helper for conversation turns, text/image streaming callbacks, built-in image generation output parsing, batch image function calls, and title generation.
+- `agentImageReferences.ts`: Resolves Agent current-input and generated-image reference IDs, rewrites `@图`/round refs into API-safe `<ref>` tags, and collects generated image slots from task records.
+- `agentWebSearch.ts`: Agent web-search tool configuration helpers.
 - `openaiCompatibleImageApi.ts`: OpenAI-compatible and custom HTTP image client. Handles Images API, Responses API, custom submit/poll mappings, Codex CLI prompt guarding, multipart edits, mask uploads, proxy routing, timeout aborts, URL/base64 result parsing, revised prompts, actual params, raw payload capture, and queued custom recovery.
 - `falAiImageApi.ts`: fal.ai client using `@fal-ai/client`. Maps model IDs to generate/edit endpoints, caps image count to fal limits, subscribes to queue jobs, records request IDs/endpoints for recovery, parses URL/base64 result variants, and maps actual params.
 - `imageApiShared.ts`: Shared call types/utilities for MIME mapping, data URL handling, fetch diagnostics, API error extraction, payload-size assertions, base64 normalization, remote image fetching, and actual-param merging.
@@ -21,6 +24,8 @@ Frontend business and infrastructure library. This directory contains API provid
 - `urlSettings.ts`: Parses URL-driven settings/profile/custom provider payloads and converts them into normalized settings updates.
 - `paramCompatibility.ts`: Normalizes params for active provider/mode, removes unsupported settings such as OpenAI Codex CLI quality or fal auto values, and exposes output-count limits.
 - `tasks.ts`: Shared task filtering/search/sort helper used by task grid and batch-selection surfaces to keep visible list and bulk action semantics aligned.
+- `promptImageMentions.ts`: Parses and rewrites prompt image mentions for input references and Agent reference labels.
+- `taskPromptDisplay.ts`: Formats task prompts for compact Agent/task display surfaces.
 - `paramDisplay.tsx`: Renders requested and actual params with mismatch highlighting for task cards/details.
 - `size.ts`: Normalizes custom dimensions to safe image sizes, rounds to multiples of 16, clamps aspect ratio and pixel bounds, and formats ratios/tiers.
 
@@ -35,6 +40,9 @@ Frontend business and infrastructure library. This directory contains API provid
 - `maskPreprocess.ts`: Resizes large mask targets to a maximum edge of 1920 and dimensions divisible by 16, converts to PNG, and replaces the target input image with the working copy.
 - `viewportTransform.ts`: Pure pan/zoom/clamp math used by the mask editor.
 - `clipboard.ts`: Clipboard write helpers with fallback messages.
+- `downloadImages.ts`: Shared single/batch image download naming and archive helpers.
+- `clickSuppression.ts`: Suppresses follow-up lightbox clicks after context-menu/download gestures.
+- `domRect.ts`: Safe DOMRect helpers for pointer/drag geometry.
 - `viewport.ts`: Mobile viewport guard installation.
 - `dropdown.ts`: Shared dropdown positioning/open-state utilities.
 - `tooltipDismiss.ts`: Global tooltip dismissal coordination.

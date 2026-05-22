@@ -4,7 +4,7 @@ import { usePreventBackgroundScroll } from '../hooks/usePreventBackgroundScroll'
 import ViewportTooltip from './ViewportTooltip'
 
 const TIERS: SizeTier[] = ['1K', '2K', '4K']
-const SIZE_LIMIT_TEXT = '由于模型限制，最终输出会自动规整到合法尺寸：宽高均为 16 的倍数，最大边长 3840px，宽高比不超过 3:1，总像素限制为 655360-8294400。'
+const SIZE_LIMIT_TEXT = '由于模型限制，最终输出会自动规整到合法尺寸：\n宽高均为 16 的倍数，最大边长 3840px，宽高比不超过 3:1，总像素限制为 655360-8294400。'
 const RATIOS = [
   { label: '1:1', value: '1:1' },
   { label: '3:2', value: '3:2' },
@@ -190,7 +190,7 @@ export default function SizePickerModal({ currentSize, onSelect, onClose, allowA
             </button>
           </div>
 
-          <div className="min-h-[220px]">
+          <div className="h-[380px] max-h-[55vh] overflow-y-auto scrollbar-thin scrollbar-thumb-gray-200 dark:scrollbar-thumb-white/10 pr-1 -mr-1 pb-2">
             {mode === 'auto' && (
               <div className="flex h-full animate-fade-in items-center justify-center pt-8 pb-4 text-center">
                 <div>
@@ -221,11 +221,29 @@ export default function SizePickerModal({ currentSize, onSelect, onClose, allowA
                 <section>
                   <div className="mb-2 text-xs font-medium text-gray-400 dark:text-gray-500">图像比例</div>
                   <div className="grid grid-cols-4 gap-2">
-                    {RATIOS.map((item) => (
-                      <button key={item.value} className={buttonClass(ratio === item.value)} onClick={() => setRatio(item.value)}>
-                        {item.label}
-                      </button>
-                    ))}
+                    {RATIOS.map((item) => {
+                      const [w, h] = item.value.split(':').map(Number)
+                      const isHorizontal = w > h
+                      const isSquare = w === h
+                      return (
+                        <button
+                          key={item.value}
+                          className={`${buttonClass(ratio === item.value)} flex flex-col items-center justify-center gap-1.5 !py-2.5`}
+                          onClick={() => setRatio(item.value)}
+                        >
+                          <div className="flex h-5 w-5 items-center justify-center">
+                            <div
+                              className="border-[1.5px] border-current rounded-[3px] opacity-60"
+                              style={{
+                                width: isHorizontal || isSquare ? '100%' : `${(w / h) * 100}%`,
+                                height: !isHorizontal || isSquare ? '100%' : `${(h / w) * 100}%`,
+                              }}
+                            />
+                          </div>
+                          <span className="text-xs">{item.label}</span>
+                        </button>
+                      )
+                    })}
                     <button className={`${buttonClass(ratio === 'custom')} col-span-4`} onClick={() => setRatio('custom')}>
                       自定义比例
                     </button>
@@ -283,12 +301,12 @@ export default function SizePickerModal({ currentSize, onSelect, onClose, allowA
                   </div>
                 </section>
                 <div className="rounded-xl border border-gray-200/80 bg-gray-50/80 p-3 text-xs text-gray-600 dark:border-white/[0.05] dark:bg-white/[0.02] dark:text-gray-400">
-                  <p className="flex items-start gap-1.5">
-                    <svg className="mt-0.5 h-4 w-4 flex-shrink-0 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <div className="flex items-start gap-2">
+                    <svg className="mt-[2px] h-4 w-4 flex-shrink-0 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                     </svg>
-                    <span>{SIZE_LIMIT_TEXT}</span>
-                  </p>
+                    <div className="whitespace-pre-line leading-relaxed">{SIZE_LIMIT_TEXT}</div>
+                  </div>
                 </div>
               </div>
             )}
@@ -313,7 +331,7 @@ export default function SizePickerModal({ currentSize, onSelect, onClose, allowA
                   <svg className="w-5 h-5 text-yellow-500 cursor-pointer" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
-                  <ViewportTooltip visible={hintVisible} className="w-56 whitespace-normal text-center">
+                  <ViewportTooltip visible={hintVisible} className="w-56 whitespace-pre-line text-center">
                     {SIZE_LIMIT_TEXT}
                   </ViewportTooltip>
                 </div>
