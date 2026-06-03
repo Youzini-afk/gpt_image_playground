@@ -103,6 +103,18 @@ export function createApiRoutes(storage: FileStorage): Hono {
     return c.json({ ok: true })
   })
 
+  api.get('/agent-conversations', (c) => c.json(storage.getAllAgentConversations()))
+  api.put('/agent-conversations', async (c) => {
+    const conversations = await c.req.json()
+    if (!Array.isArray(conversations)) return c.json({ error: 'Invalid agent conversations payload' }, 400)
+    storage.replaceAgentConversations(conversations)
+    return c.json({ ok: true })
+  })
+  api.delete('/agent-conversations', (c) => {
+    storage.clearAgentConversations()
+    return c.json({ ok: true })
+  })
+
   return api
 }
 

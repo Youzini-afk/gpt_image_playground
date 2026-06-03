@@ -25,7 +25,8 @@ import {
   switchApiProfileProvider,
 } from '../lib/apiProfiles'
 import { copyTextToClipboard, getClipboardFailureMessage } from '../lib/clipboard'
-import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, DEFAULT_STREAM_PARTIAL_IMAGES, type ApiProfile, type AppSettings, type CustomProviderDefinition } from '../types'
+import { requestBrowserNotificationPermission, type BrowserNotificationPermissionResult } from '../lib/browserNotification'
+import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, DEFAULT_STREAM_PARTIAL_IMAGES, type ApiProfile, type AppSettings, type CustomProviderDefinition, type ZipDownloadRoute } from '../types'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 import { usePreventBackgroundScroll } from '../hooks/usePreventBackgroundScroll'
 import { DEFAULT_DROPDOWN_MAX_HEIGHT, getDropdownMaxHeight } from '../lib/dropdown'
@@ -49,6 +50,15 @@ const DEFAULT_COPY_IMPORT_URL_OPTIONS = {
 }
 
 type CopyImportUrlOptions = typeof DEFAULT_COPY_IMPORT_URL_OPTIONS
+
+const ZIP_DOWNLOAD_ROUTE_OPTIONS: Array<{ route: ZipDownloadRoute; label: string; description: string }> = [
+  { route: 'task-selection', label: '任务列表 > 多选', description: '主页或收藏夹详情中框选、Ctrl/⌘ 点选或移动端滑动选中任务后的“下载选中”。' },
+  { route: 'favorite-collection-selection', label: '收藏夹列表 > 多选', description: '收藏夹概览页选中一个或多个收藏夹后的“下载选中”。' },
+  { route: 'image-context-menu-all', label: '图片右键菜单 > 下载全部', description: '右键图片时下载同一组输出图片。' },
+  { route: 'task-detail-all', label: '任务详情 > 下载全部', description: '任务详情弹窗中下载当前任务的所有输出图。' },
+  { route: 'task-detail-partial', label: '任务详情 > 下载中间步骤图', description: '任务详情弹窗中下载流式生成保留的中间步骤图。' },
+  { route: 'agent-round-all', label: 'Agent 对话轮次 > 下载所有图片', description: 'Agent 对话中下载某轮回复关联的全部图片。' },
+]
 
 function readCopyImportUrlOptions(): CopyImportUrlOptions {
   if (typeof window === 'undefined') return DEFAULT_COPY_IMPORT_URL_OPTIONS
@@ -185,6 +195,16 @@ function getImportedProfileFromMergedSettings(
   return nextSettings.profiles.find((profile) => !previousProfileIds.has(profile.id)) ?? nextSettings.profiles[0]
 }
 
+function isAsyncCustomProvider(provider: CustomProviderDefinition | null | undefined) {
+  return Boolean(provider?.poll || provider?.submit.taskIdPath || provider?.editSubmit?.taskIdPath)
+}
+
+function isProfileApiProxyEligible(settings: AppSettings, profile: ApiProfile) {
+  if (!isOpenAICompatibleProvider(settings, profile.provider)) return false
+  const customProvider = settings.customProviders.find((provider) => provider.id === profile.provider)
+  return !isAsyncCustomProvider(customProvider)
+}
+
 const CUSTOM_PROVIDER_LLM_PROMPT = `# 角色
 你是 API 文档解析助手。你的任务是根据用户提供的图像生成 API 文档，生成本应用可导入的自定义服务商配置 JSON。
 
@@ -251,6 +271,7 @@ multipart files 示例：
 - baseUrl：API Base URL。如果文档明确给出，填入完整基础地址；否则留空字符串 ""。
 - model：模型 ID。如果 API 文档明确了默认模型，填入该值；否则使用 "gpt-image-2"。
 - apiMode：固定为 "images"。
+- apiProxy：可选。仅同步自定义服务商可以设为 true，用于配合部署端 API 代理隐藏真实上游地址；包含 taskIdPath 或 poll 的异步任务配置不要开启，应用不支持异步自定义服务商走代理。
 
 profiles 中不要包含 apiKey（用户导入后自行填写）。
 
@@ -290,6 +311,7 @@ export default function SettingsModal() {
   const llmPromptTooltipTimerRef = useRef<number | null>(null)
   const settingsScrollBoundaryRef = useRef<HTMLDivElement>(null)
   const customProviderScrollBoundaryRef = useRef<HTMLDivElement>(null)
+  const zipDownloadRouteScrollBoundaryRef = useRef<HTMLDivElement>(null)
   
   const [draft, setDraft] = useState<AppSettings>(normalizeSettings(settings))
   const [timeoutInput, setTimeoutInput] = useState(String(getActiveApiProfile(settings).timeout))
@@ -300,6 +322,7 @@ export default function SettingsModal() {
   const [connectionResult, setConnectionResult] = useState<{ ok: boolean; error?: string } | null>(null)
   const [profileMenuMaxHeight, setProfileMenuMaxHeight] = useState(DEFAULT_DROPDOWN_MAX_HEIGHT)
   const [showCustomProviderImport, setShowCustomProviderImport] = useState(false)
+  const [showZipDownloadRouteManager, setShowZipDownloadRouteManager] = useState(false)
   const [editingCustomProviderId, setEditingCustomProviderId] = useState<string | null>(null)
   const [customProviderForm, setCustomProviderForm] = useState<CustomProviderForm>(createDefaultCustomProviderForm())
   const [customProviderImportError, setCustomProviderImportError] = useState<string | null>(null)
@@ -337,11 +360,13 @@ export default function SettingsModal() {
   const apiProxyForced = isApiProxyForced(apiProxyConfig)
   const apiProxyLocked = isApiProxyLocked(apiProxyConfig)
   const activeProfile = draft.profiles.find((profile) => profile.id === draft.activeProfileId) ?? draft.profiles[0] ?? getActiveApiProfile(draft)
-  const apiProxyChecked = activeProfile.provider === 'openai' && (apiProxyForced || apiProxyLocked || activeProfile.apiProxy)
-  const apiProxyEnabled = apiProxyAvailable && activeProfile.provider === 'openai' && apiProxyChecked
   const activeProviderIsOpenAICompatible = isOpenAICompatibleProvider(draft, activeProfile.provider)
   const activeProviderUsesApiUrl = activeProviderIsOpenAICompatible || activeProfile.provider === 'fal'
   const activeCustomProvider = draft.customProviders.find((provider) => provider.id === activeProfile.provider)
+  const activeProfileApiProxyEligible = isProfileApiProxyEligible(draft, activeProfile)
+  const activeCustomProviderAsync = isAsyncCustomProvider(activeCustomProvider)
+  const apiProxyChecked = activeProfileApiProxyEligible && (apiProxyForced || apiProxyLocked || activeProfile.apiProxy)
+  const apiProxyEnabled = apiProxyAvailable && activeProfileApiProxyEligible && apiProxyChecked
   const defaultProviderOrder = ['openai', 'fal', ...draft.customProviders.map(p => p.id)]
   const providerOrder = draft.providerOrder || defaultProviderOrder
 
@@ -377,6 +402,14 @@ export default function SettingsModal() {
   const getDefaultModelForMode = (apiMode: AppSettings['apiMode']) =>
     apiMode === 'responses' ? DEFAULT_RESPONSES_MODEL : DEFAULT_IMAGES_MODEL
 
+  const enabledZipDownloadRouteCount = ZIP_DOWNLOAD_ROUTE_OPTIONS
+    .filter((option) => draft.zipDownloadRoutes.includes(option.route))
+    .length
+
+  const zipDownloadRouteSummary = enabledZipDownloadRouteCount
+    ? `已开启 ${enabledZipDownloadRouteCount} 项使用压缩包进行批量下载的途径`
+    : '未开启任何使用压缩包进行批量下载的途径'
+
   const wasSettingsOpenRef = useRef(false)
 
   useEffect(() => {
@@ -395,7 +428,7 @@ export default function SettingsModal() {
       ...displaySettings,
       profiles: displaySettings.profiles.map((profile) => ({
         ...profile,
-        apiProxy: profile.provider === 'openai' && apiProxyAvailable
+        apiProxy: isProfileApiProxyEligible(displaySettings, profile) && apiProxyAvailable
           ? (apiProxyForced || apiProxyLocked || profile.apiProxy)
           : false,
       })),
@@ -487,9 +520,11 @@ export default function SettingsModal() {
 
   const commitSettings = (nextDraft: AppSettings) => {
     const normalizedProfiles = nextDraft.profiles.map((profile) => {
+      const nextApiProxy = isProfileApiProxyEligible(nextDraft, profile) && apiProxyAvailable ? (apiProxyForced || apiProxyLocked || profile.apiProxy) : false
+      const shouldKeepEmptyBaseUrl = profile.provider !== 'fal' && nextApiProxy && !profile.baseUrl.trim()
       const normalizedBaseUrl = profile.provider === 'fal'
         ? profile.baseUrl.trim().replace(/\/+$/, '') || DEFAULT_FAL_BASE_URL
-        : normalizeBaseUrl(profile.baseUrl.trim() || DEFAULT_SETTINGS.baseUrl)
+        : shouldKeepEmptyBaseUrl ? '' : normalizeBaseUrl(profile.baseUrl.trim() || DEFAULT_SETTINGS.baseUrl)
       const defaultModel = profile.provider === 'fal' ? DEFAULT_FAL_MODEL : getDefaultModelForMode(profile.apiMode)
       return {
         ...profile,
@@ -497,7 +532,7 @@ export default function SettingsModal() {
         baseUrl: normalizedBaseUrl,
         model: profile.model.trim() || defaultModel,
         timeout: Number(profile.timeout) || DEFAULT_SETTINGS.timeout,
-        apiProxy: profile.provider === 'openai' && apiProxyAvailable ? (apiProxyForced || apiProxyLocked || profile.apiProxy) : false,
+        apiProxy: nextApiProxy,
         codexCli: profile.provider === 'openai' ? profile.codexCli : false,
         streamImages: profile.provider === 'openai' ? profile.streamImages : false,
         streamPartialImages: profile.provider === 'openai' ? normalizeStreamPartialImages(profile.streamPartialImages) : DEFAULT_STREAM_PARTIAL_IMAGES,
@@ -513,6 +548,13 @@ export default function SettingsModal() {
     })
     setDraft(normalizedDraft)
     setSettings(normalizedDraft)
+  }
+
+  const setZipDownloadRouteEnabled = (route: ZipDownloadRoute, enabled: boolean) => {
+    const nextRoutes = enabled
+      ? Array.from(new Set([...draft.zipDownloadRoutes, route]))
+      : draft.zipDownloadRoutes.filter((item) => item !== route)
+    commitSettings({ ...draft, zipDownloadRoutes: nextRoutes })
   }
 
   const updateCopyImportUrlOptions = (patch: Partial<CopyImportUrlOptions>) => {
@@ -610,6 +652,10 @@ export default function SettingsModal() {
   }
 
   const handleClose = () => {
+    if (showZipDownloadRouteManager) {
+      setShowZipDownloadRouteManager(false)
+      return
+    }
     const nextTimeout = Number(timeoutInput)
     const normalizedTimeout =
       timeoutInput.trim() === '' || Number.isNaN(nextTimeout)
@@ -649,8 +695,35 @@ export default function SettingsModal() {
     if (value !== draft.agentMaxToolRounds) commitSettings({ ...draft, agentMaxToolRounds: value })
   }, [agentMaxToolRoundsInput, draft])
 
+  const showNotificationPermissionMessage = (result: Exclude<BrowserNotificationPermissionResult, { ok: true }>) => {
+    if (result.reason === 'unsupported') {
+      showToast('当前浏览器不支持系统通知', 'error')
+    } else if (result.reason === 'insecure') {
+      showToast('系统通知需要 HTTPS 或 localhost 安全上下文', 'error')
+    } else if (result.reason === 'denied') {
+      showToast('通知权限已被浏览器拒绝，请在地址栏左侧的网站设置中手动开启', 'error')
+    } else {
+      showToast('没有开启系统通知', 'info')
+    }
+  }
+
+  const toggleTaskCompletionNotification = async () => {
+    if (draft.taskCompletionNotification) {
+      commitSettings({ ...draft, taskCompletionNotification: false })
+      return
+    }
+
+    const result = await requestBrowserNotificationPermission()
+    if (result.ok) {
+      commitSettings({ ...draft, taskCompletionNotification: true })
+      showToast('任务完成通知已开启', 'success')
+    } else {
+      showNotificationPermissionMessage(result)
+    }
+  }
+
   useCloseOnEscape(showSettings, handleClose)
-  usePreventBackgroundScroll(showSettings, showCustomProviderImport ? customProviderScrollBoundaryRef : settingsScrollBoundaryRef)
+  usePreventBackgroundScroll(showSettings, showZipDownloadRouteManager ? zipDownloadRouteScrollBoundaryRef : showCustomProviderImport ? customProviderScrollBoundaryRef : settingsScrollBoundaryRef)
 
   if (!showSettings) return null
 
@@ -1143,15 +1216,34 @@ export default function SettingsModal() {
                         value={draft.enterSubmit ? 'enter' : 'ctrl-enter'}
                         onChange={(val) => commitSettings({ ...draft, enterSubmit: val === 'enter' })}
                         options={[
-                          { label: 'Enter', value: 'enter' },
-                          { label: navigator.userAgent.includes('Mac') ? 'Cmd + Enter' : 'Ctrl + Enter', value: 'ctrl-enter' }
+                          { label: navigator.userAgent.includes('Mac') ? '⌘ + Enter' : 'Ctrl + Enter', value: 'ctrl-enter' },
+                          { label: 'Enter', value: 'enter' }
                         ]}
                         className="w-full px-3 py-1.5 rounded-xl border border-gray-200/60 dark:border-white/[0.08] bg-white/50 dark:bg-white/[0.03] hover:bg-white dark:hover:bg-white/[0.06] text-xs transition-all duration-200 shadow-sm text-gray-700 dark:text-gray-200 outline-none"
                       />
                     </div>
                   </div>
                   <div data-selectable-text className="text-xs text-gray-500 dark:text-gray-500">
-                    选择 Enter 提交时，使用 Shift + Enter 换行；否则直接 Enter 换行。
+                    选择 {navigator.userAgent.includes('Mac') ? '⌘ + Enter' : 'Ctrl + Enter'} 时，Enter 换行；选择 Enter 时，Shift + Enter 换行。
+                  </div>
+                </div>
+                <div className="sm:hidden">
+                  <div className="mb-1 flex items-center justify-between gap-3">
+                    <span className="block text-sm text-gray-600 dark:text-gray-300">任务提交方式</span>
+                    <div className="w-36">
+                      <Select
+                        value={draft.enterSubmit ? 'enter' : 'button'}
+                        onChange={(val) => commitSettings({ ...draft, enterSubmit: val === 'enter' })}
+                        options={[
+                          { label: '发送按钮', value: 'button' },
+                          { label: '回车/发送按钮', value: 'enter' }
+                        ]}
+                        className="w-full px-3 py-1.5 rounded-xl border border-gray-200/60 dark:border-white/[0.08] bg-white/50 dark:bg-white/[0.03] hover:bg-white dark:hover:bg-white/[0.06] text-xs transition-all duration-200 shadow-sm text-gray-700 dark:text-gray-200 outline-none"
+                      />
+                    </div>
+                  </div>
+                  <div data-selectable-text className="text-xs text-gray-500 dark:text-gray-500">
+                    选择回车/发送按钮时，回车可提交；否则仅使用发送按钮提交。
                   </div>
                 </div>
                 <div className="block">
@@ -1190,6 +1282,21 @@ export default function SettingsModal() {
                   </div>
                   <div data-selectable-text className="text-xs text-gray-500 dark:text-gray-500">
                     控制未添加遮罩的参考图点击编辑按钮时，是每次询问、直接替换参考图，还是直接添加遮罩。
+                  </div>
+                </div>
+                <div className="block">
+                  <div className="mb-1 flex items-center justify-between gap-3">
+                    <span className="block text-sm text-gray-600 dark:text-gray-300">使用压缩包进行的批量下载途径</span>
+                    <button
+                      type="button"
+                      onClick={() => setShowZipDownloadRouteManager(true)}
+                      className="shrink-0 rounded-xl border border-gray-200/80 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 shadow-sm transition hover:bg-gray-50 hover:text-gray-900 dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-gray-300 dark:hover:bg-white/[0.08] dark:hover:text-white"
+                    >
+                      管理
+                    </button>
+                  </div>
+                  <div data-selectable-text className="text-xs text-gray-500 dark:text-gray-500">
+                    {zipDownloadRouteSummary}
                   </div>
                 </div>
                 <div className="block">
@@ -1244,6 +1351,24 @@ export default function SettingsModal() {
                   </div>
                   <div data-selectable-text className="text-xs text-gray-500 dark:text-gray-500">
                     开启后，即使任务成功生成，也会在任务卡片和详情页显示重试按钮。
+                  </div>
+                </div>
+                <div className="block">
+                  <div className="mb-1 flex items-center justify-between">
+                    <span className="block text-sm text-gray-600 dark:text-gray-300">任务完成后发送系统通知</span>
+                    <button
+                      type="button"
+                      onClick={() => { void toggleTaskCompletionNotification() }}
+                      className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${draft.taskCompletionNotification ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-600'}`}
+                      role="switch"
+                      aria-checked={draft.taskCompletionNotification}
+                      aria-label="任务完成后发送系统通知"
+                    >
+                      <span className={`inline-block h-3 w-3 transform rounded-full bg-white shadow transition-transform ${draft.taskCompletionNotification ? 'translate-x-[14px]' : 'translate-x-[2px]'}`} />
+                    </button>
+                  </div>
+                  <div data-selectable-text className="text-xs text-gray-500 dark:text-gray-500">
+                    开启后，画廊模式图像生成完成、Agent 模式回复结束时，会发送浏览器系统通知。浏览器可能会请求通知权限或默认拒绝，请查看相关提示。
                   </div>
                 </div>
                 <div className="block">
@@ -1545,7 +1670,7 @@ export default function SettingsModal() {
               )}
 
               {/* 4. API 代理（紧跟 URL） */}
-              {apiProxyAvailable && activeProfile.provider === 'openai' && (
+              {apiProxyAvailable && activeProviderIsOpenAICompatible && !activeCustomProviderAsync && (
                 <div className="block">
                   <div className="mb-1.5 flex items-center justify-between">
                     <span className="block text-sm text-gray-600 dark:text-gray-300">API 代理</span>
@@ -1563,38 +1688,38 @@ export default function SettingsModal() {
                       <span className={`inline-block h-3 w-3 transform rounded-full bg-white shadow transition-transform ${apiProxyChecked ? 'translate-x-[14px]' : 'translate-x-[2px]'}`} />
                     </button>
                     </div>
-                    <div data-selectable-text className="text-xs text-gray-500 dark:text-gray-500">
-                      {apiProxyForced
-                        ? '当前 Docker/Zeabur 部署已强制使用同源代理；上方 API URL 仍会作为后端转发目标。'
-                        : apiProxyLocked
-                          ? '当前部署已锁定 API 代理为开启。'
-                          : '当前部署提供同源代理时默认开启，可手动关闭。开启后用于解决浏览器跨域限制。'}
-                    </div>
+                  <div data-selectable-text className="text-xs text-gray-500 dark:text-gray-500">
+                    {apiProxyForced
+                      ? '当前 Docker/Zeabur 部署已强制使用同源代理；请求经服务器转发到上游 API，上方 API URL 仍会作为后端转发目标。'
+                      : apiProxyLocked
+                        ? '当前部署已锁定 API 代理为开启；请求经服务器转发到上游 API。'
+                        : '当前部署提供同源代理时默认开启，可手动关闭。开启后请求经服务器转发到上游 API，可绕过浏览器跨域限制。'}
                   </div>
-                )}
+                </div>
+              )}
 
-                {activeProfile.provider === 'openai' && (
-                  <div className="block">
-                    <div className="mb-1.5 flex items-center justify-between">
-                      <span className="block text-sm text-gray-600 dark:text-gray-300">编辑图字段</span>
-                      <button
-                        type="button"
-                        onClick={() => updateActiveProfile({ editImageField: activeProfile.editImageField === 'image' ? 'image[]' : 'image' }, true)}
-                        className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${activeProfile.editImageField === 'image' ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-600'}`}
-                        role="switch"
-                        aria-checked={activeProfile.editImageField === 'image'}
-                        aria-label="编辑图字段"
-                      >
-                        <span className={`inline-block h-3 w-3 transform rounded-full bg-white shadow transition-transform ${activeProfile.editImageField === 'image' ? 'translate-x-[14px]' : 'translate-x-[2px]'}`} />
-                      </button>
-                    </div>
-                    <div data-selectable-text className="text-xs text-gray-500 dark:text-gray-500">
-                      {activeProfile.editImageField === 'image'
-                        ? '兼容只识别 image 字段的编辑接口。'
-                        : '默认使用 OpenAI 的 image[] 字段。'}
-                    </div>
+              {activeProfile.provider === 'openai' && (
+                <div className="block">
+                  <div className="mb-1.5 flex items-center justify-between">
+                    <span className="block text-sm text-gray-600 dark:text-gray-300">编辑图字段</span>
+                    <button
+                      type="button"
+                      onClick={() => updateActiveProfile({ editImageField: activeProfile.editImageField === 'image' ? 'image[]' : 'image' }, true)}
+                      className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${activeProfile.editImageField === 'image' ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-600'}`}
+                      role="switch"
+                      aria-checked={activeProfile.editImageField === 'image'}
+                      aria-label="编辑图字段"
+                    >
+                      <span className={`inline-block h-3 w-3 transform rounded-full bg-white shadow transition-transform ${activeProfile.editImageField === 'image' ? 'translate-x-[14px]' : 'translate-x-[2px]'}`} />
+                    </button>
                   </div>
-                )}
+                  <div data-selectable-text className="text-xs text-gray-500 dark:text-gray-500">
+                    {activeProfile.editImageField === 'image'
+                      ? '兼容只识别 image 字段的编辑接口。'
+                      : '默认使用 OpenAI 的 image[] 字段。'}
+                  </div>
+                </div>
+              )}
 
               {/* 5. API Key */}
               <div className="block">
@@ -1800,7 +1925,7 @@ export default function SettingsModal() {
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
                   </svg>
                   <div className="text-[13px] leading-relaxed text-gray-500 dark:text-gray-400">
-                    所有的配置、任务记录和生成的图片均仅保存在您的浏览器本地（除非您使用的服务商存储了它们）。如果您需要清理浏览器站点数据、重置浏览器或使用其他设备，请先导出备份。
+                    所有的配置、任务和生成的图片均仅保存在您的浏览器本地（除非您使用的服务商存储了它们）。如果您需要清理浏览器站点数据、重置浏览器或使用其他设备，请先导出备份。
                   </div>
                 </div>
 
@@ -2045,6 +2170,81 @@ export default function SettingsModal() {
         </div>
       </div>
       </div>
+
+        {showZipDownloadRouteManager && createPortal(
+          <div
+            data-no-drag-select
+            className="fixed inset-0 z-[110] flex items-center justify-center p-4"
+            onClick={() => setShowZipDownloadRouteManager(false)}
+          >
+            <div className="absolute inset-0 bg-black/20 dark:bg-black/40 backdrop-blur-md animate-overlay-in" />
+            <div
+              className="relative z-10 w-full max-w-md rounded-3xl bg-white/90 dark:bg-gray-900/90 backdrop-blur-xl border border-white/50 dark:border-white/[0.08] shadow-[0_8px_40px_rgb(0,0,0,0.12)] dark:shadow-[0_8px_40px_rgb(0,0,0,0.4)] ring-1 ring-black/5 dark:ring-white/10 animate-confirm-in flex flex-col max-h-[85vh] sm:max-h-[90vh]"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="shrink-0 p-6 pb-2">
+                <div className="mb-3 flex items-center justify-between gap-4">
+                  <h3 className="text-base font-bold text-gray-800 dark:text-gray-100">使用压缩包进行批量下载</h3>
+                  <button
+                    type="button"
+                    onClick={() => setShowZipDownloadRouteManager(false)}
+                    className="shrink-0 rounded-full p-1 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-white/[0.06] dark:hover:text-gray-200"
+                    aria-label="关闭"
+                  >
+                    <CloseIcon className="h-5 w-5" />
+                  </button>
+                </div>
+
+                <div data-selectable-text className="text-sm leading-relaxed text-gray-500 dark:text-gray-400">
+                  开启后，在对应途径进行批量下载时会将结果下载为一个 ZIP，而不是多个图片文件。
+                </div>
+              </div>
+
+              <div ref={zipDownloadRouteScrollBoundaryRef} className="flex-1 overflow-y-auto px-6 space-y-3 custom-scrollbar min-h-0 py-2">
+                {ZIP_DOWNLOAD_ROUTE_OPTIONS.map((option) => {
+                  const isChecked = draft.zipDownloadRoutes.includes(option.route)
+                  return (
+                    <div
+                      key={option.route}
+                      role="checkbox"
+                      aria-checked={isChecked}
+                      tabIndex={0}
+                      onClick={() => setZipDownloadRouteEnabled(option.route, !isChecked)}
+                      onKeyDown={(event) => {
+                        if (event.key !== 'Enter' && event.key !== ' ') return
+                        event.preventDefault()
+                        setZipDownloadRouteEnabled(option.route, !isChecked)
+                      }}
+                      className={`cursor-pointer rounded-2xl border p-3.5 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500/20 ${isChecked ? 'border-blue-500/30 bg-blue-50/50 dark:border-blue-400/30 dark:bg-blue-500/[0.05]' : 'border-gray-100 bg-gray-50/70 hover:bg-gray-100/70 dark:border-white/[0.06] dark:bg-white/[0.03] dark:hover:bg-white/[0.05]'}`}
+                    >
+                      <div onClick={(event) => event.stopPropagation()}>
+                        <Checkbox
+                          checked={isChecked}
+                          onChange={(checked) => setZipDownloadRouteEnabled(option.route, checked)}
+                          label={<span className="text-sm font-medium text-gray-700 dark:text-gray-200">{option.label}</span>}
+                        />
+                      </div>
+                      <div data-selectable-text className="mt-1.5 pl-6 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+                        {option.description}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+
+              <div className="shrink-0 p-6 pt-4 flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowZipDownloadRouteManager(false)}
+                  className="flex-1 rounded-lg bg-blue-500 py-2 text-sm font-medium text-white transition hover:bg-blue-600"
+                >
+                  完成
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
 
         {showCustomProviderImport && createPortal(
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">

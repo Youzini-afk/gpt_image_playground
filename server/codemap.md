@@ -11,8 +11,8 @@ Node/Hono runtime for production self-hosting. It serves the built SPA, exposes 
 
 ## Modules
 - `index.ts`: Application bootstrap. Reads env vars, creates `FileStorage`, optionally enables an access-password gate, mounts `/api/storage`, conditionally mounts `/api-proxy/*`, serves `./dist`, and starts `@hono/node-server` on `HOST`/`PORT`.
-- `routes.ts`: REST routes for `tasks`, `images`, image thumbnails, and `canvas-images`. Includes `GET /ping`, CRUD-like endpoints, idempotent image upsert, lightweight `GET /images/ids`, thumbnail endpoints, and `?full=true` image listing for export.
-- `storage.ts`: SQLite persistence using `better-sqlite3`. Creates `tasks`, `images`, `image_thumbnails`, and `canvas_images` tables with JSON blobs and created-at indexes. Migrates legacy JSON files when SQLite tables are empty.
+- `routes.ts`: REST routes for `tasks`, `images`, image thumbnails, `canvas-images`, and `agent-conversations`. Includes `GET /ping`, CRUD-like endpoints, idempotent image upsert, lightweight `GET /images/ids`, thumbnail endpoints, and `?full=true` image listing for export.
+- `storage.ts`: SQLite persistence using `better-sqlite3`. Creates `tasks`, `images`, `image_thumbnails`, `canvas_images`, and `agent_conversations` tables with JSON blobs and created/updated-at indexes. Migrates legacy JSON files when SQLite tables are empty.
 - `proxy.ts`: Builds proxy targets from server default URL or client `x-gip-api-base-url`, deduplicates `/v1`, removes unsafe request/response headers, and injects permissive CORS response headers.
 
 ## Runtime Environment
@@ -35,7 +35,7 @@ Node/Hono runtime for production self-hosting. It serves the built SPA, exposes 
 1. `FileStorage` opens `${DATA_DIR}/storage.db`, enables WAL and normal synchronous mode.
 2. Tables are created if missing.
 3. If all tables are empty, legacy `tasks.json`, `images/*.json`, and `canvas/*.json` are imported.
-4. CRUD methods serialize domain objects as JSON in table rows keyed by `id`; image deletion and clearing also remove associated thumbnail rows.
+4. CRUD methods serialize domain objects as JSON in table rows keyed by `id`; image deletion and clearing also remove associated thumbnail rows, and Agent conversations are replace-all persisted for conversation-state sync.
 
 ## Integration Points
 - Built by `esbuild-server.mjs` into `dist-server/index.js` with `better-sqlite3` external.

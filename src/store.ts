@@ -12,6 +12,7 @@ import type {
   InputImage,
   MaskDraft,
   TaskRecord,
+  FavoriteCollection,
   ExportData,
   StoredImage,
   StoredImageThumbnail,
@@ -30,7 +31,8 @@ import {
 import { getStorage, setStorageMode, testServerStorage } from './lib/storage'
 import { callImageApi } from './lib/api'
 import { callAgentConversationTitleApi, callAgentResponsesApi, callBatchImageSingle, parseBatchImageCallArguments, type AgentApiResultImage, type BatchImageCallResult } from './lib/agentApi'
-import { collectAgentRoundOutputImageSlots, getAgentCurrentReferenceId, getAgentGeneratedImageReferenceId, replaceAgentPromptImageReferencesForApi } from './lib/agentImageReferences'
+import { collectAgentRoundOutputImageSlots, extractAgentReferenceIds, getAgentCurrentReferenceId, getAgentGeneratedImageReferenceId, replaceAgentPromptImageReferencesForApi } from './lib/agentImageReferences'
+import { showBrowserNotification } from './lib/browserNotification'
 import { IMAGE_FETCH_CORS_HINT } from './lib/imageApiShared'
 import { getFalErrorMessage, getFalQueuedImageResult } from './lib/falAiImageApi'
 import { getCustomQueuedImageResult } from './lib/openaiCompatibleImageApi'
@@ -38,6 +40,10 @@ import { validateMaskMatchesImage } from './lib/canvasImage'
 import { orderInputImagesForMask } from './lib/mask'
 import { getChangedParams, normalizeParamsForSettings } from './lib/paramCompatibility'
 import { zipSync, unzipSync, strToU8, strFromU8 } from 'fflate'
+
+export const ALL_FAVORITES_COLLECTION_ID = '__all_favorites__'
+export const DEFAULT_FAVORITE_COLLECTION_ID = '__default_favorites__'
+export const DEFAULT_FAVORITE_COLLECTION_NAME = '默认'
 
 // ===== Image cache =====
 // 内存缓存，id → dataUrl。只保留少量最近使用图片，避免大量 4K data URL 常驻内存。
@@ -66,10 +72,13 @@ const FAL_RECOVERY_POLL_MS = 10_000
 const CUSTOM_RECOVERY_POLL_MS = 10_000
 const SUPPORT_PROMPT_IMAGE_THRESHOLD = 50
 const AGENT_INPUT_DRAFT_RETENTION_MS = 3 * 24 * 60 * 60 * 1000
+const AGENT_ROUND_IMAGE_MENTION_RE = /@(?:第)?(\d+)轮图(\d+)/g
 const falRecoveryTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const customRecoveryTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const openAIWatchdogTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const agentRoundControllers = new Map<string, AbortController>()
+let agentConversationPersistenceReady = false
+let agentConversationMigrationPending = false
 const OPENAI_INTERRUPTED_ERROR = '请求中断'
 const AGENT_STOPPED_MESSAGE = '已停止生成。'
 const AGENT_CONVERSATION_TITLE_MAX_LENGTH = 28
@@ -131,7 +140,7 @@ async function getAllTasks() {
 }
 
 async function putTask(task: TaskRecord) {
-  await getStorage().putTask(task)
+  await getStorage().putTask(getPersistableTask(task))
 }
 
 async function dbDeleteTask(id: string) {
@@ -616,6 +625,12 @@ function isAgentTask(task: TaskRecord) {
   return task.sourceMode === 'agent' || Boolean(task.agentConversationId || task.agentRoundId)
 }
 
+function showTaskCompletionNotification(title: string, body: string) {
+  const settings = normalizeSettings(useStore.getState().settings)
+  if (!settings.taskCompletionNotification) return
+  showBrowserNotification(title, { body })
+}
+
 function countSuccessfulOutputImages(tasks: TaskRecord[]) {
   return tasks.reduce((count, task) => count + (task.status === 'done' && !isAgentTask(task) ? task.outputImages.length : 0), 0)
 }
@@ -769,6 +784,136 @@ function mergeImportedAgentConversations(current: AgentConversation[], imported:
   return merged
 }
 
+function mergeAgentConversationsForStorage(stored: AgentConversation[], legacy: AgentConversation[]) {
+  const merged = new Map<string, AgentConversation>()
+  for (const conversation of stored) merged.set(conversation.id, conversation)
+  for (const conversation of legacy) {
+    const existing = merged.get(conversation.id)
+    if (!existing || conversation.updatedAt >= existing.updatedAt) {
+      merged.set(conversation.id, conversation)
+    }
+  }
+  return [...merged.values()].sort((a, b) => a.createdAt - b.createdAt)
+}
+
+function getPersistableResponseOutputItem(item: ResponsesOutputItem): ResponsesOutputItem {
+  if (item.type !== 'image_generation_call' || item.result == null) return item
+
+  if (typeof item.result === 'string') {
+    const { result: _result, ...rest } = item
+    return rest
+  }
+
+  if (!isRecord(item.result)) return item
+  const { b64_json: _b64Json, base64: _base64, image: _image, data: _data, ...restResult } = item.result
+  if (Object.keys(restResult).length === 0) {
+    const { result: _result, ...rest } = item
+    return rest
+  }
+
+  return { ...item, result: restResult }
+}
+
+function getPersistableAgentConversations(conversations: AgentConversation[]): AgentConversation[] {
+  return conversations.map((conversation) => ({
+    ...conversation,
+    rounds: conversation.rounds.map((round) => round.responseOutput?.length
+      ? {
+          ...round,
+          responseOutput: round.responseOutput.map(getPersistableResponseOutputItem),
+        }
+      : round,
+    ),
+  }))
+}
+
+function stripPersistedAgentConversations(value: unknown): unknown {
+  if (!Array.isArray(value)) return value
+  return value.map((conversation) => {
+    if (!isRecord(conversation) || !Array.isArray(conversation.rounds)) return conversation
+    return {
+      ...conversation,
+      rounds: conversation.rounds.map((round) => {
+        if (!isRecord(round) || !Array.isArray(round.responseOutput)) return round
+        return {
+          ...round,
+          responseOutput: round.responseOutput.map((item) =>
+            isRecord(item) ? getPersistableResponseOutputItem(item as ResponsesOutputItem) : item,
+          ),
+        }
+      }),
+    }
+  })
+}
+
+export function migratePersistedState(persistedState: unknown): unknown {
+  if (!isRecord(persistedState)) return persistedState
+  return {
+    ...persistedState,
+    agentConversations: stripPersistedAgentConversations(persistedState.agentConversations),
+  }
+}
+
+function normalizeFavoriteCollectionName(value: string) {
+  return value.trim().replace(/\s+/g, ' ')
+}
+
+function createDefaultFavoriteCollection(now = Date.now()): FavoriteCollection {
+  return {
+    id: DEFAULT_FAVORITE_COLLECTION_ID,
+    name: DEFAULT_FAVORITE_COLLECTION_NAME,
+    createdAt: now,
+    updatedAt: now,
+  }
+}
+
+function normalizeFavoriteCollections(value: unknown): FavoriteCollection[] {
+  const now = Date.now()
+  const collections = Array.isArray(value) ? value : []
+  const normalized: FavoriteCollection[] = []
+  const ids = new Set<string>()
+  for (const item of collections) {
+    if (!isRecord(item)) continue
+    if (typeof item.id !== 'string' || !item.id.trim()) continue
+    const id = item.id
+    if (id === ALL_FAVORITES_COLLECTION_ID || ids.has(id)) continue
+    const name = normalizeFavoriteCollectionName(typeof item.name === 'string' ? item.name : '')
+    if (!name) continue
+    ids.add(id)
+    normalized.push({
+      id,
+      name: name.slice(0, 60),
+      createdAt: typeof item.createdAt === 'number' ? item.createdAt : now,
+      updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : now,
+    })
+  }
+  return normalized
+}
+
+function ensureDefaultFavoriteCollection(collections: FavoriteCollection[]) {
+  if (collections.length > 0) return collections
+  return [createDefaultFavoriteCollection(), ...collections]
+}
+
+/** 确保"默认"收藏夹存在（用于兜底孤立收藏任务） */
+function ensureDefaultNamedCollection(collections: FavoriteCollection[]) {
+  if (getDefaultNamedFavoriteCollectionId(collections)) return collections
+  return [createDefaultFavoriteCollection(), ...collections]
+}
+
+function getDefaultNamedFavoriteCollectionId(collections: FavoriteCollection[]) {
+  return collections.find((collection) => collection.id === DEFAULT_FAVORITE_COLLECTION_ID)?.id
+    ?? collections.find((collection) => collection.name === DEFAULT_FAVORITE_COLLECTION_NAME)?.id
+    ?? null
+}
+
+function resolveDefaultFavoriteCollectionId(collections: FavoriteCollection[], preferredId: unknown) {
+  if (preferredId === null) return null
+  if (typeof preferredId === 'string' && collections.some((collection) => collection.id === preferredId)) return preferredId
+  if (collections.some((collection) => collection.id === DEFAULT_FAVORITE_COLLECTION_ID)) return DEFAULT_FAVORITE_COLLECTION_ID
+  return collections[0]?.id ?? null
+}
+
 function createAgentConversation(now = Date.now()): AgentConversation {
   return {
     id: genId(),
@@ -820,16 +965,28 @@ export function getPersistedState(state: AppState) {
     galleryInputDraft: settings.persistInputOnRestart && galleryInputDraft
       ? { ...galleryInputDraft, inputImages: galleryInputDraft.inputImages.map((img) => ({ id: img.id, dataUrl: '' })) }
       : null,
-    agentConversations: state.agentConversations,
+    ...(agentConversationMigrationPending && !agentConversationPersistenceReady
+      ? { agentConversations: getPersistableAgentConversations(state.agentConversations) }
+      : {}),
     activeAgentConversationId: state.activeAgentConversationId,
     agentInputDrafts: getPersistableAgentInputDrafts(state),
     agentSidebarCollapsed: state.agentSidebarCollapsed,
     agentAssetTab: state.agentAssetTab,
     agentAssetPanelCollapsed: state.agentAssetPanelCollapsed,
+    favoriteCollections: state.favoriteCollections,
+    defaultFavoriteCollectionId: state.defaultFavoriteCollectionId,
     supportPromptDismissed: state.supportPromptDismissed,
     supportPromptOpen: state.supportPromptOpen,
     supportPromptSkippedForImportedData: state.supportPromptSkippedForImportedData,
   }
+}
+
+async function replaceStoredAgentConversations(conversations: AgentConversation[]) {
+  await getStorage().replaceAgentConversations(conversations.map(getPersistableAgentConversation))
+}
+
+function getPersistableAgentConversation(conversation: AgentConversation): AgentConversation {
+  return getPersistableAgentConversations([conversation])[0]!
 }
 
 function mergePersistedState(persistedState: unknown, currentState: AppState): AppState {
@@ -837,9 +994,15 @@ function mergePersistedState(persistedState: unknown, currentState: AppState): A
 
   const persisted = persistedState as Partial<AppState>
   const settings = normalizeSettings(persisted.settings ?? currentState.settings)
-  const agentConversations = normalizeAgentConversations(persisted.agentConversations)
+  const hasPersistedAgentConversations = Array.isArray(persisted.agentConversations)
+  if (hasPersistedAgentConversations && normalizeAgentConversations(persisted.agentConversations).length > 0) {
+    agentConversationMigrationPending = true
+  }
+  const agentConversations = hasPersistedAgentConversations
+    ? normalizeAgentConversations(persisted.agentConversations)
+    : currentState.agentConversations
   const activeAgentConversationId =
-    typeof persisted.activeAgentConversationId === 'string' && agentConversations.some((conversation) => conversation.id === persisted.activeAgentConversationId)
+    typeof persisted.activeAgentConversationId === 'string' && (!hasPersistedAgentConversations || agentConversations.some((conversation) => conversation.id === persisted.activeAgentConversationId))
       ? persisted.activeAgentConversationId
       : agentConversations[0]?.id ?? null
   const appMode = persisted.appMode === 'agent' ? 'agent' : 'gallery'
@@ -855,10 +1018,10 @@ function mergePersistedState(persistedState: unknown, currentState: AppState): A
         maskEditorImageId: null,
       })
     : null
-  let agentInputDrafts = cleanStaleAgentInputDrafts(
-    normalizeAgentInputDrafts(persisted.agentInputDrafts, agentConversations),
-    activeAgentConversationId,
-  )
+  const normalizedAgentInputDrafts = hasPersistedAgentConversations
+    ? normalizeAgentInputDrafts(persisted.agentInputDrafts, agentConversations)
+    : normalizeAgentInputDraftsByKey(persisted.agentInputDrafts)
+  let agentInputDrafts = cleanStaleAgentInputDrafts(normalizedAgentInputDrafts, activeAgentConversationId)
   if (appMode === 'agent' && activeAgentConversationId && !agentInputDrafts[activeAgentConversationId] && settings.persistInputOnRestart && typeof persisted.prompt === 'string') {
     agentInputDrafts = {
       ...agentInputDrafts,
@@ -873,6 +1036,10 @@ function mergePersistedState(persistedState: unknown, currentState: AppState): A
   const restoredAgentDraft = appMode === 'agent' && activeAgentConversationId
     ? agentInputDrafts[activeAgentConversationId] ?? null
     : null
+  const favoriteCollections = Array.isArray(persisted.favoriteCollections)
+    ? ensureDefaultFavoriteCollection(normalizeFavoriteCollections(persisted.favoriteCollections))
+    : currentState.favoriteCollections
+  const defaultFavoriteCollectionId = resolveDefaultFavoriteCollectionId(favoriteCollections, persisted.defaultFavoriteCollectionId)
   return {
     ...currentState,
     ...persisted,
@@ -885,6 +1052,10 @@ function mergePersistedState(persistedState: unknown, currentState: AppState): A
     agentSidebarCollapsed: Boolean(persisted.agentSidebarCollapsed),
     agentAssetTab: persisted.agentAssetTab === 'references' ? 'references' : 'outputs',
     agentAssetPanelCollapsed: Boolean(persisted.agentAssetPanelCollapsed),
+    favoriteCollections,
+    defaultFavoriteCollectionId,
+    activeFavoriteCollectionId: null,
+    favoritePickerTaskIds: null,
     supportPromptDismissed: Boolean(persisted.supportPromptDismissed),
     supportPromptOpen: Boolean(persisted.supportPromptOpen),
     supportPromptSkippedForImportedData: Boolean(persisted.supportPromptSkippedForImportedData),
@@ -937,6 +1108,7 @@ interface AppState {
 
   // Agent
   agentConversations: AgentConversation[]
+  agentConversationsLoaded: boolean
   activeAgentConversationId: string | null
   agentInputDrafts: Record<string, AgentInputDraft>
   agentSidebarCollapsed: boolean
@@ -961,6 +1133,18 @@ interface AppState {
   // 任务列表
   tasks: TaskRecord[]
   setTasks: (t: TaskRecord[]) => void
+  favoriteCollections: FavoriteCollection[]
+  setFavoriteCollections: (collections: FavoriteCollection[]) => void
+  defaultFavoriteCollectionId: string | null
+  setDefaultFavoriteCollectionId: (id: string | null) => void
+  activeFavoriteCollectionId: string | null
+  isManageCollectionsModalOpen: boolean
+  setActiveFavoriteCollectionId: (id: string | null) => void
+  openManageCollectionsModal: () => void
+  closeManageCollectionsModal: () => void
+  favoritePickerTaskIds: string[] | null
+  openFavoritePicker: (taskIds: string[]) => void
+  closeFavoritePicker: () => void
   streamPreviews: Record<string, string>
   streamPreviewSlots: Record<string, Record<string, string>>
   setTaskStreamPreview: (taskId: string, image?: string, requestIndex?: number) => void
@@ -982,6 +1166,10 @@ interface AppState {
   setSelectedTaskIds: (ids: string[] | ((prev: string[]) => string[])) => void
   toggleTaskSelection: (id: string, force?: boolean) => void
   clearSelection: () => void
+  selectedFavoriteCollectionIds: string[]
+  setSelectedFavoriteCollectionIds: (ids: string[] | ((prev: string[]) => string[])) => void
+  toggleFavoriteCollectionSelection: (id: string, force?: boolean) => void
+  clearFavoriteCollectionSelection: () => void
 
   // UI
   detailTaskId: string | null
@@ -1111,6 +1299,16 @@ function normalizeAgentInputDrafts(value: unknown, conversations: AgentConversat
   const drafts: Record<string, AgentInputDraft> = {}
   for (const [conversationId, draft] of Object.entries(value)) {
     if (!conversationIds.has(conversationId)) continue
+    const normalized = normalizeAgentInputDraft(draft)
+    if (!isEmptyAgentInputDraft(normalized)) drafts[conversationId] = normalized
+  }
+  return drafts
+}
+
+function normalizeAgentInputDraftsByKey(value: unknown): Record<string, AgentInputDraft> {
+  if (!isRecord(value)) return {}
+  const drafts: Record<string, AgentInputDraft> = {}
+  for (const [conversationId, draft] of Object.entries(value)) {
     const normalized = normalizeAgentInputDraft(draft)
     if (!isEmptyAgentInputDraft(normalized)) drafts[conversationId] = normalized
   }
@@ -1254,6 +1452,7 @@ export const useStore = create<AppState>()(
             galleryInputDraft,
             agentMobileHeaderVisible: true,
             selectedTaskIds: [],
+            selectedFavoriteCollectionIds: [],
             agentEditingRoundId: null,
             ...(state.appMode === 'agent' ? restoreGalleryInputDraftState(galleryInputDraft) : {}),
           }))
@@ -1273,6 +1472,7 @@ export const useStore = create<AppState>()(
             agentSidebarCollapsed: true,
             agentAssetPanelCollapsed: true,
             selectedTaskIds: [],
+            selectedFavoriteCollectionIds: [],
             ...restoreAgentInputDraftState(state.agentInputDrafts, state.activeAgentConversationId),
           }))
           return
@@ -1484,6 +1684,7 @@ export const useStore = create<AppState>()(
 
       // Agent
       agentConversations: [],
+      agentConversationsLoaded: false,
       activeAgentConversationId: null,
       agentInputDrafts: {},
       agentSidebarCollapsed: true,
@@ -1583,6 +1784,32 @@ export const useStore = create<AppState>()(
           ? { supportPromptSkippedForImportedData: false }
           : {}),
       })),
+      favoriteCollections: [createDefaultFavoriteCollection()],
+      setFavoriteCollections: (favoriteCollections) => set((state) => {
+        const nextCollections = ensureDefaultFavoriteCollection(normalizeFavoriteCollections(favoriteCollections))
+        return {
+          favoriteCollections: nextCollections,
+          defaultFavoriteCollectionId: resolveDefaultFavoriteCollectionId(nextCollections, state.defaultFavoriteCollectionId),
+        }
+      }),
+      defaultFavoriteCollectionId: DEFAULT_FAVORITE_COLLECTION_ID,
+      setDefaultFavoriteCollectionId: (defaultFavoriteCollectionId) => set((state) => (
+        defaultFavoriteCollectionId === null || state.favoriteCollections.some((collection) => collection.id === defaultFavoriteCollectionId)
+          ? { defaultFavoriteCollectionId }
+          : state
+      )),
+      activeFavoriteCollectionId: null,
+      isManageCollectionsModalOpen: false,
+      setActiveFavoriteCollectionId: (activeFavoriteCollectionId) => set({ activeFavoriteCollectionId, selectedTaskIds: [], selectedFavoriteCollectionIds: [] }),
+      openManageCollectionsModal: () => set({ isManageCollectionsModalOpen: true }),
+      closeManageCollectionsModal: () => set({ isManageCollectionsModalOpen: false }),
+      favoritePickerTaskIds: null,
+      openFavoritePicker: (taskIds) => {
+        if (!taskIds.length) return
+        dismissAllTooltips()
+        set({ favoritePickerTaskIds: Array.from(new Set(taskIds)).filter(Boolean) })
+      },
+      closeFavoritePicker: () => set({ favoritePickerTaskIds: null }),
       streamPreviews: {},
       streamPreviewSlots: {},
       setTaskStreamPreview: (taskId, image, requestIndex = 0) => set((s) => {
@@ -1617,7 +1844,7 @@ export const useStore = create<AppState>()(
       filterStatus: 'all',
       setFilterStatus: (filterStatus) => set({ filterStatus }),
       filterFavorite: false,
-      setFilterFavorite: (filterFavorite) => set({ filterFavorite }),
+      setFilterFavorite: (filterFavorite) => set(filterFavorite ? { filterFavorite, selectedTaskIds: [], selectedFavoriteCollectionIds: [] } : { filterFavorite, activeFavoriteCollectionId: null, selectedTaskIds: [], selectedFavoriteCollectionIds: [] }),
 
       // Selection
       selectedTaskIds: [],
@@ -1635,6 +1862,21 @@ export const useStore = create<AppState>()(
         }
       }),
       clearSelection: () => set({ selectedTaskIds: [] }),
+      selectedFavoriteCollectionIds: [],
+      setSelectedFavoriteCollectionIds: (updater) => set((s) => ({
+        selectedFavoriteCollectionIds: typeof updater === 'function' ? updater(s.selectedFavoriteCollectionIds) : updater
+      })),
+      toggleFavoriteCollectionSelection: (id, force) => set((s) => {
+        const isSelected = s.selectedFavoriteCollectionIds.includes(id)
+        const shouldSelect = force !== undefined ? force : !isSelected
+        if (shouldSelect === isSelected) return s
+        return {
+          selectedFavoriteCollectionIds: shouldSelect
+            ? [...s.selectedFavoriteCollectionIds, id]
+            : s.selectedFavoriteCollectionIds.filter((x) => x !== id)
+        }
+      }),
+      clearFavoriteCollectionSelection: () => set({ selectedFavoriteCollectionIds: [] }),
 
       // UI
       detailTaskId: null,
@@ -1684,6 +1926,8 @@ export const useStore = create<AppState>()(
     }),
     {
       name: 'gpt-image-playground',
+      version: 2,
+      migrate: (persistedState) => migratePersistedState(persistedState),
       partialize: getPersistedState,
       merge: mergePersistedState,
     },
@@ -1738,11 +1982,62 @@ export async function switchStorageMode(mode: 'local' | 'server') {
   await initStore()
 }
 
+let lastStoredAgentConversations = useStore.getState().agentConversations
+let agentConversationPersistRunning = false
+let agentConversationPersistQueued = false
+
+async function flushAgentConversationsToIndexedDB() {
+  if (agentConversationPersistRunning) {
+    agentConversationPersistQueued = true
+    return
+  }
+
+  agentConversationPersistRunning = true
+  try {
+    do {
+      agentConversationPersistQueued = false
+      const conversations = useStore.getState().agentConversations
+      await replaceStoredAgentConversations(conversations)
+      lastStoredAgentConversations = conversations
+    } while (agentConversationPersistQueued || useStore.getState().agentConversations !== lastStoredAgentConversations)
+  } finally {
+    agentConversationPersistRunning = false
+  }
+}
+
+useStore.subscribe((state) => {
+  if (state.agentConversations === lastStoredAgentConversations) return
+  if (!agentConversationPersistenceReady || !state.agentConversationsLoaded) {
+    agentConversationPersistQueued = true
+    return
+  }
+  void flushAgentConversationsToIndexedDB()
+})
+
 // ===== Actions =====
 
 let uid = 0
 function genId(): string {
   return Date.now().toString(36) + (++uid).toString(36) + Math.random().toString(36).slice(2, 6)
+}
+
+function getPersistableRawResponsePayload(rawResponsePayload?: string) {
+  if (!rawResponsePayload) return rawResponsePayload
+  try {
+    const payload = JSON.parse(rawResponsePayload) as { output?: unknown }
+    if (!Array.isArray(payload.output)) return rawResponsePayload
+    const output = payload.output.map((item) =>
+      isRecord(item) ? getPersistableResponseOutputItem(item as ResponsesOutputItem) : item,
+    )
+    return JSON.stringify({ ...payload, output }, null, 2)
+  } catch {
+    return rawResponsePayload
+  }
+}
+
+function getPersistableTask(task: TaskRecord): TaskRecord {
+  const rawResponsePayload = getPersistableRawResponsePayload(task.rawResponsePayload)
+  return rawResponsePayload === task.rawResponsePayload ? task : { ...task, rawResponsePayload }
 }
 
 export function getCodexCliPromptKey(settings: AppSettings): string {
@@ -2065,6 +2360,7 @@ async function completeRecoveredFalTask(task: TaskRecord, result: Awaited<Return
     elapsed: Date.now() - task.createdAt,
   })
   useStore.getState().showToast(`fal.ai 任务已恢复，共 ${outputIds.length} 张图片`, 'success')
+  if (!isAgentTask(task)) showTaskCompletionNotification('图像生成完成', `fal.ai 任务已恢复，共 ${outputIds.length} 张图片。`)
 }
 
 async function recoverFalTask(taskId: string) {
@@ -2103,9 +2399,57 @@ async function recoverFalTask(taskId: string) {
 
 /** 初始化：从 IndexedDB 加载任务，按需恢复输入图片，并清理孤立图片 */
 export async function initStore() {
+  const legacyAgentConversations = normalizeAgentConversations(useStore.getState().agentConversations)
   const storedTasks = await getAllTasks()
-  const { tasks, interruptedTasks } = markInterruptedOpenAIRunningTasks(storedTasks)
-  await Promise.all(interruptedTasks.map((task) => putTask(task)))
+  const storedAgentConversations = normalizeAgentConversations(await getStorage().getAllAgentConversations())
+  let loadedAgentConversations = mergeAgentConversationsForStorage(storedAgentConversations, legacyAgentConversations)
+  const currentAgentConversations = normalizeAgentConversations(useStore.getState().agentConversations)
+  loadedAgentConversations = mergeAgentConversationsForStorage(loadedAgentConversations, currentAgentConversations)
+  const activeAgentConversationId = useStore.getState().activeAgentConversationId && loadedAgentConversations.some((conversation) => conversation.id === useStore.getState().activeAgentConversationId)
+    ? useStore.getState().activeAgentConversationId
+    : loadedAgentConversations[0]?.id ?? null
+  if (loadedAgentConversations.length > 0 || legacyAgentConversations.length > 0) {
+    useStore.setState((state) => {
+      const agentInputDrafts = cleanStaleAgentInputDrafts(
+        normalizeAgentInputDrafts(state.agentInputDrafts, loadedAgentConversations),
+        activeAgentConversationId,
+      )
+      return {
+        agentConversations: loadedAgentConversations,
+        agentConversationsLoaded: true,
+        activeAgentConversationId,
+        agentInputDrafts,
+        ...(state.appMode === 'agent' ? restoreAgentInputDraftState(agentInputDrafts, activeAgentConversationId) : {}),
+      }
+    })
+    await replaceStoredAgentConversations(loadedAgentConversations)
+  } else {
+    useStore.setState({ agentConversationsLoaded: true })
+  }
+  const shouldRewritePersistedLocalState = agentConversationMigrationPending
+  agentConversationPersistenceReady = true
+  agentConversationMigrationPending = false
+  if (agentConversationPersistQueued || useStore.getState().agentConversations !== lastStoredAgentConversations) {
+    await flushAgentConversationsToIndexedDB()
+  }
+  lastStoredAgentConversations = useStore.getState().agentConversations
+  if (shouldRewritePersistedLocalState) {
+    useStore.setState({})
+  }
+  const { tasks: markedTasks, interruptedTasks } = markInterruptedOpenAIRunningTasks(storedTasks)
+  const interruptedTaskIds = new Set(interruptedTasks.map((task) => task.id))
+  const favoriteState = useStore.getState()
+  const normalizedFavorites = normalizeLoadedFavoriteState(markedTasks.map(getPersistableTask), favoriteState.favoriteCollections, favoriteState.defaultFavoriteCollectionId)
+  const tasks = normalizedFavorites.tasks
+  if (normalizedFavorites.collections !== favoriteState.favoriteCollections) {
+    favoriteState.setFavoriteCollections(normalizedFavorites.collections)
+  }
+  if (normalizedFavorites.defaultFavoriteCollectionId !== favoriteState.defaultFavoriteCollectionId) {
+    useStore.getState().setDefaultFavoriteCollectionId(normalizedFavorites.defaultFavoriteCollectionId)
+  }
+  await Promise.all(tasks
+    .filter((task, index) => normalizedFavorites.changed || interruptedTaskIds.has(task.id) || task.rawResponsePayload !== markedTasks[index]?.rawResponsePayload)
+    .map((task) => putTask(task)))
   useStore.getState().setTasks(tasks)
   showSupportPromptForExistingLocalData(tasks)
   for (const task of tasks) {
@@ -2650,6 +2994,72 @@ export function getActiveAgentRounds(conversation: AgentConversation): AgentRoun
   return getAgentRoundPath(conversation, activeRoundId ?? null)
 }
 
+function reindexAgentRounds(conversation: AgentConversation): AgentConversation {
+  const indexById = new Map<string, number>()
+  const visit = (parentRoundId: string | null, depth: number) => {
+    for (const child of getAgentRoundChildren(conversation, parentRoundId)) {
+      indexById.set(child.id, depth)
+      visit(child.id, depth + 1)
+    }
+  }
+  visit(null, 1)
+  return {
+    ...conversation,
+    rounds: conversation.rounds.map((round) => ({
+      ...round,
+      index: indexById.get(round.id) ?? round.index,
+    })),
+  }
+}
+
+export function remapAgentRoundMentionsForPathChange(content: string, oldPath: AgentRound[], newPath: AgentRound[]) {
+  if (!content || oldPath.length === 0) return content
+  const newIndexByRoundId = new Map(newPath.map((round, index) => [round.id, index + 1]))
+  return content.replace(AGENT_ROUND_IMAGE_MENTION_RE, (match, roundNumber: string, imageNumber: string) => {
+    const oldRound = oldPath[Number(roundNumber) - 1]
+    if (!oldRound) return match
+    const newRoundIndex = newIndexByRoundId.get(oldRound.id)
+    if (!newRoundIndex) return `@已删除轮次图${imageNumber}`
+    return `@第${newRoundIndex}轮图${imageNumber}`
+  })
+}
+
+export function deleteAgentRoundFromConversation(conversation: AgentConversation, roundId: string, now = Date.now()): AgentConversation {
+  const targetRound = conversation.rounds.find((round) => round.id === roundId)
+  if (!targetRound) return conversation
+
+  const oldPathByRoundId = new Map(conversation.rounds.map((round) => [round.id, getAgentRoundPath(conversation, round.id)]))
+  const rounds = conversation.rounds
+    .filter((candidate) => candidate.id !== roundId)
+    .map((candidate) =>
+      candidate.parentRoundId === roundId
+        ? { ...candidate, parentRoundId: targetRound.parentRoundId ?? null }
+        : candidate,
+    )
+  const messages = conversation.messages.filter((candidate) => candidate.roundId !== roundId)
+  const nextConversation = reindexAgentRounds({
+    ...conversation,
+    rounds,
+    messages,
+    activeRoundId: conversation.activeRoundId === roundId ? null : conversation.activeRoundId ?? null,
+  })
+  const newPathByRoundId = new Map(nextConversation.rounds.map((round) => [round.id, getAgentRoundPath(nextConversation, round.id)]))
+  const remappedMessages = nextConversation.messages.map((message) => {
+    if (!message.roundId) return message
+    const oldPath = oldPathByRoundId.get(message.roundId) ?? []
+    const newPath = newPathByRoundId.get(message.roundId) ?? []
+    const content = remapAgentRoundMentionsForPathChange(message.content, oldPath, newPath)
+    return content === message.content ? message : { ...message, content }
+  })
+  const withRemappedMessages = { ...nextConversation, messages: remappedMessages }
+  const activeRounds = getActiveAgentRounds(withRemappedMessages)
+  return {
+    ...withRemappedMessages,
+    activeRoundId: withRemappedMessages.activeRoundId ?? activeRounds[activeRounds.length - 1]?.id ?? null,
+    updatedAt: now,
+  }
+}
+
 export function getAgentSiblingRounds(conversation: AgentConversation, round: AgentRound) {
   return getAgentRoundChildren(conversation, round.parentRoundId ?? null)
 }
@@ -2753,12 +3163,59 @@ async function createAgentUserInputItem(conversation: AgentConversation, round: 
   }
 }
 
-function createAgentGeneratedReferenceLabelsItem(round: AgentRound, tasks: TaskRecord[]) {
-  const refs = createAgentGeneratedReferenceEntries(round, tasks)
-  if (refs.length <= 0) return null
-  return createAgentAssistantFallbackItem(
-    `<available_refs>${refs.join('')}\n</available_refs>`,
-  )
+async function createAgentGeneratedImagesInputItem(round: AgentRound, tasks: TaskRecord[]) {
+  const contentParts: Array<{ type: string; text?: string; image_url?: string }> = []
+  let imageIndex = 0
+  for (const taskId of round.outputTaskIds) {
+    const task = tasks.find((item) => item.id === taskId)
+    if (!task) {
+      contentParts.push({ type: 'input_text', text: `<removed_ref id="${getAgentGeneratedImageReferenceId(round, imageIndex)}" />` })
+      imageIndex += 1
+      continue
+    }
+    for (const imageId of task.outputImages) {
+      const dataUrl = await ensureImageCached(imageId)
+      if (dataUrl) {
+        contentParts.push({ type: 'input_image', image_url: dataUrl })
+      }
+      const refId = getAgentGeneratedImageReferenceId(round, imageIndex)
+      const prompt = truncateAgentReferencePrompt(task.prompt || '')
+      const promptAttribute = prompt ? ` prompt="${escapeXmlAttribute(prompt)}"` : ''
+      contentParts.push({ type: 'input_text', text: `<ref id="${refId}"${promptAttribute} />` })
+      imageIndex += 1
+    }
+  }
+  if (contentParts.length === 0) return null
+  return { role: 'user', content: contentParts }
+}
+
+async function createAgentBatchImagesInputItem(round: AgentRound, tasks: TaskRecord[], batchTaskIds: string[]) {
+  const contentParts: Array<{ type: string; text?: string; image_url?: string }> = []
+  // Count existing images in the round to compute correct imageIndex offset
+  let baseImageIndex = 0
+  for (const taskId of round.outputTaskIds) {
+    if (batchTaskIds.includes(taskId)) break
+    const task = tasks.find((item) => item.id === taskId)
+    baseImageIndex += task ? task.outputImages.length : 1
+  }
+  let imageIndex = baseImageIndex
+  for (const taskId of batchTaskIds) {
+    const task = tasks.find((item) => item.id === taskId)
+    if (!task || task.status !== 'done') continue
+    for (const imgId of task.outputImages) {
+      const dataUrl = await ensureImageCached(imgId)
+      if (dataUrl) {
+        contentParts.push({ type: 'input_image', image_url: dataUrl })
+      }
+      const refId = getAgentGeneratedImageReferenceId(round, imageIndex)
+      const prompt = truncateAgentReferencePrompt(task.prompt || '')
+      const promptAttribute = prompt ? ` prompt="${escapeXmlAttribute(prompt)}"` : ''
+      contentParts.push({ type: 'input_text', text: `<ref id="${refId}"${promptAttribute} />` })
+      imageIndex += 1
+    }
+  }
+  if (contentParts.length === 0) return null
+  return { role: 'user', content: contentParts }
 }
 
 function escapeXmlAttribute(value: string) {
@@ -2772,26 +3229,6 @@ function escapeXmlAttribute(value: string) {
 function truncateAgentReferencePrompt(prompt: string) {
   const normalized = prompt.replace(/\s+/g, ' ').trim()
   return normalized.length > 1200 ? `${normalized.slice(0, 1200)}...` : normalized
-}
-
-function createAgentGeneratedReferenceEntries(round: AgentRound, tasks: TaskRecord[]) {
-  const entries: string[] = []
-  let imageIndex = 0
-  for (const taskId of round.outputTaskIds) {
-    const task = tasks.find((item) => item.id === taskId)
-    if (!task) {
-      entries.push(`\n  <removed_ref id="${getAgentGeneratedImageReferenceId(round, imageIndex)}" />`)
-      imageIndex += 1
-      continue
-    }
-    const prompt = truncateAgentReferencePrompt(task.prompt || '')
-    const promptAttribute = prompt ? ` prompt="${escapeXmlAttribute(prompt)}"` : ''
-    for (const _imageId of task.outputImages) {
-      entries.push(`\n  <ref id="${getAgentGeneratedImageReferenceId(round, imageIndex)}"${promptAttribute} />`)
-      imageIndex += 1
-    }
-  }
-  return entries
 }
 
 function createAgentAssistantFallbackItem(text: string) {
@@ -2813,15 +3250,7 @@ function parseResponseOutputFromPayload(rawResponsePayload?: string): ResponsesO
 
 function sanitizeResponseOutputItemForInput(item: ResponsesOutputItem): unknown | null {
   if (item.type === 'web_search_call') return null
-
-  if (item.type === 'image_generation_call') {
-    if (typeof item.result !== 'string' || !item.result.trim()) return null
-    return {
-      ...(typeof item.id === 'string' && item.id ? { id: item.id } : {}),
-      type: 'image_generation_call',
-      result: item.result,
-    }
-  }
+  if (item.type === 'image_generation_call') return null
 
   if (item.type === 'message') {
     const content = (item.content ?? [])
@@ -2840,26 +3269,10 @@ function sanitizeResponseOutputItemForInput(item: ResponsesOutputItem): unknown 
   return item
 }
 
-function filterAgentRoundResponseOutputForInput(round: AgentRound, tasks: TaskRecord[], output: ResponsesOutputItem[]) {
-  const roundTaskIds = new Set(round.outputTaskIds)
-  const roundTaskSlots = round.outputTaskIds.map((taskId) => tasks.find((task) => task.id === taskId) ?? null)
-  let anonymousImageIndex = 0
-
-  return output.filter((item) => {
-    if (item.type !== 'image_generation_call') return true
-
-    if (typeof item.id === 'string' && item.id) {
-      return tasks.some((task) =>
-        roundTaskIds.has(task.id) &&
-        task.agentRoundId === round.id &&
-        task.agentToolCallId === item.id,
-      )
-    }
-
-    const task = roundTaskSlots[anonymousImageIndex]
-    anonymousImageIndex += 1
-    return Boolean(task)
-  })
+function filterAgentRoundResponseOutputForInput(_round: AgentRound, _tasks: TaskRecord[], output: ResponsesOutputItem[]) {
+  // image_generation_call items are now dropped by sanitizeResponseOutputItemForInput;
+  // this filter is kept as a structural pass-through for future use.
+  return output
 }
 
 function scrubResponseOutputForDeletedAgentTasks(round: AgentRound, output: ResponsesOutputItem[], deletedTasks: TaskRecord[]) {
@@ -3006,8 +3419,6 @@ function createAgentContinuationInputItem(newImageRefs: string[], toolCallsUsed:
 
 function buildAgentContinuationInput(baseInput: unknown[], round: AgentRound, tasks: TaskRecord[], currentRoundOutput: ResponsesOutputItem[], toolCallsUsed: number, maxToolCalls: number) {
   const input = [...baseInput, ...sanitizeResponseOutputForInput(currentRoundOutput, { allowPendingFunctionCalls: true })]
-  const labelsItem = createAgentGeneratedReferenceLabelsItem(round, tasks)
-  if (labelsItem) input.push(labelsItem)
   const newImageRefs = collectAgentRoundOutputImageSlots(round, tasks)
     .map((imageId, index) => imageId ? `<ref id="${getAgentGeneratedImageReferenceId(round, index)}" />` : null)
     .filter((ref): ref is string => Boolean(ref))
@@ -3041,20 +3452,31 @@ async function buildAgentApiInput(conversation: AgentConversation, currentRound:
     const output = getAgentRoundResponseOutput(round, tasks)
     if (output?.length) {
       const sanitizedOutput = sanitizeResponseOutputForInput(filterAgentRoundResponseOutputForInput(round, tasks, output))
-      if (sanitizedOutput.length > 0) input.push(...sanitizedOutput)
-      const labelsItem = createAgentGeneratedReferenceLabelsItem(round, tasks)
-      if (labelsItem) input.push(labelsItem)
-      continue
+      if (sanitizedOutput.length > 0) {
+        input.push(...sanitizedOutput)
+      } else {
+        // All output items were filtered (e.g. only image_generation_call); add fallback
+        const assistantMessage = round.assistantMessageId
+          ? conversation.messages.find((message) => message.id === round.assistantMessageId)
+          : null
+        input.push(createAgentAssistantFallbackItem(
+          assistantMessage?.content || '图像已生成。',
+        ))
+      }
+    } else {
+      const assistantMessage = round.assistantMessageId
+        ? conversation.messages.find((message) => message.id === round.assistantMessageId)
+        : null
+      input.push(createAgentAssistantFallbackItem(
+        assistantMessage?.content || '[No text response]',
+      ))
     }
 
-    const assistantMessage = round.assistantMessageId
-      ? conversation.messages.find((message) => message.id === round.assistantMessageId)
-      : null
-    input.push(createAgentAssistantFallbackItem(
-      assistantMessage?.content || '[No text response]',
-    ))
-    const labelsItem = createAgentGeneratedReferenceLabelsItem(round, tasks)
-    if (labelsItem) input.push(labelsItem)
+    // Inject generated images as a separate user message with input_image parts
+    if (round.outputTaskIds.length > 0) {
+      const imagesItem = await createAgentGeneratedImagesInputItem(round, tasks)
+      if (imagesItem) input.push(imagesItem)
+    }
   }
 
   return input
@@ -3116,10 +3538,6 @@ export async function submitAgentMessage() {
   }
 
   const requestSettings = createSettingsForApiProfile(normalizedSettings, activeProfile)
-  const normalizedParams = {
-    ...normalizeParamsForSettings(params, requestSettings, { hasInputImages: inputImageIds.length > 0 }),
-    n: DEFAULT_PARAMS.n,
-  }
   const now = Date.now()
   const editingRound = state.agentEditingRoundId
     ? conversation.rounds.find((item) => item.id === state.agentEditingRoundId) ?? null
@@ -3143,6 +3561,10 @@ export async function submitAgentMessage() {
   const activeLeafId = activeRounds[activeRounds.length - 1]?.id ?? null
   const parentRoundId = editingRound ? editingRound.parentRoundId ?? null : activeLeafId
   const parentPath = parentRoundId ? getAgentRoundPath(conversation, parentRoundId) : []
+  const normalizedParams = {
+    ...normalizeParamsForSettings(params, requestSettings, { hasInputImages: inputImageIds.length > 0 }),
+    n: DEFAULT_PARAMS.n,
+  }
   const round: AgentRound = {
     id: roundId,
     index: shouldAppendToEditingRound && editingRound ? editingRound.index : parentPath.length + 1,
@@ -3493,7 +3915,7 @@ async function executeAgentRound(
       }
 
       for (const refId of referenceIds) {
-        // Try to find the image id from the round's output tasks by matching generated ref ids
+        // Resolve both generated image refs and current/user input refs from XML tags.
         const latestConv = useStore.getState().agentConversations.find((item) => item.id === conversationId)
         if (!latestConv) continue
         for (const r of getAgentRoundPath(latestConv, roundId)) {
@@ -3502,7 +3924,6 @@ async function executeAgentRound(
               await addResolvedImage(r.inputImageIds[inputIdx])
             }
           }
-
           const outputImages = collectAgentRoundOutputImageSlots(r, useStore.getState().tasks)
           for (let imgIdx = 0; imgIdx < outputImages.length; imgIdx++) {
             const generatedRefId = getAgentGeneratedImageReferenceId(r, imgIdx)
@@ -3542,7 +3963,8 @@ async function executeAgentRound(
       // Create task cards in model-provided order before starting network calls.
       const batchExecutionItems = []
       for (const item of batchItems) {
-        const references = await resolveReferenceImages(item.reference_ids)
+        const referenceIds = uniqueIds(extractAgentReferenceIds(item.prompt))
+        const references = await resolveReferenceImages(referenceIds)
         const batchToolCallId = genId()
         await ensureStreamingAgentTask(batchToolCallId, item.prompt, references.imageIds, {
           createdAt: Date.now(),
@@ -3550,11 +3972,11 @@ async function executeAgentRound(
           maskImageId: null,
           ...(callId ? { agentBatchCallId: callId } : {}),
         })
-        batchExecutionItems.push({ item, batchToolCallId, references })
+        batchExecutionItems.push({ item, batchToolCallId, references, referenceIds })
       }
 
       // Fire all batch items concurrently after all cards are visible.
-      const batchPromises = batchExecutionItems.map(async ({ item, batchToolCallId, references }) => {
+      const batchPromises = batchExecutionItems.map(async ({ item, batchToolCallId, references, referenceIds }) => {
         try {
           const batchResult = await callBatchImageSingle({
             profile: activeProfile,
@@ -3562,7 +3984,7 @@ async function executeAgentRound(
             batchItemId: item.id,
             prompt: item.prompt,
             referenceImageDataUrls: references.dataUrls,
-            referenceIds: item.reference_ids,
+            referenceIds,
             signal: controller.signal,
             onImageToolStarted: shouldStreamAssistantMessage
               ? async () => {
@@ -3710,9 +4132,24 @@ async function executeAgentRound(
       // Process built-in image_generation_call results (single images)
       for (const image of result.images) {
         if (image.toolCallId && taskIdByToolCallId.has(image.toolCallId)) {
-          await completeAgentImageTask(image, result.rawResponsePayload)
+          const completedTaskId = await completeAgentImageTask(image, result.rawResponsePayload)
+          const promptRefIds = uniqueIds(extractAgentReferenceIds(image.revisedPrompt ?? ''))
+          if (promptRefIds.length > 0) {
+            const promptRefs = await resolveReferenceImages(promptRefIds)
+            if (promptRefs.imageIds.length > 0) {
+              const latestTask = useStore.getState().tasks.find((t) => t.id === completedTaskId)
+              if (latestTask) {
+                const mergedInputIds = uniqueIds([...latestTask.inputImageIds, ...promptRefs.imageIds])
+                if (mergedInputIds.length !== latestTask.inputImageIds.length) {
+                  updateTaskInStore(completedTaskId, { inputImageIds: mergedInputIds })
+                }
+              }
+            }
+          }
           continue
         }
+        const promptRefIds = uniqueIds(extractAgentReferenceIds(image.revisedPrompt ?? ''))
+        const promptRefs = await resolveReferenceImages(promptRefIds)
         const imgId = await storeImage(image.dataUrl, 'generated')
         cacheImage(imgId, image.dataUrl)
         const actualParams: Partial<TaskParams> = {
@@ -3728,7 +4165,7 @@ async function executeAgentRound(
           apiProfileName: activeProfile.name,
           apiMode: activeProfile.apiMode,
           apiModel: activeProfile.model,
-          inputImageIds: round?.inputImageIds ?? [],
+          inputImageIds: uniqueIds([...(round?.inputImageIds ?? []), ...promptRefs.imageIds]),
           maskTargetImageId: round?.maskTargetImageId ?? null,
           maskImageId: round?.maskImageId ?? null,
           outputImages: [imgId],
@@ -3830,7 +4267,11 @@ async function executeAgentRound(
         toolCallsUsed,
         maxToolCalls,
       )
+      // Insert function_call_output items before the continuation system message
       continuationBase.splice(continuationBase.length - 1, 0, ...functionCallOutputs)
+      // Inject batch-generated images as input_image user message for model visibility
+      const batchImagesItem = await createAgentBatchImagesInputItem(latestRound, useStore.getState().tasks, streamingTaskIds)
+      if (batchImagesItem) continuationBase.splice(continuationBase.length - 1, 0, batchImagesItem)
       apiInputForTurn = continuationBase
       accumulatedOutputItems = accumulatedOutputItemsWithFunctionOutputs
       pendingToolTextSeparator = true
@@ -3877,6 +4318,10 @@ async function executeAgentRound(
     }))
 
     useStore.getState().showToast(outputIds.length > 0 ? 'Agent 已生成图片' : 'Agent 已回复', 'success')
+    showTaskCompletionNotification(
+      outputIds.length > 0 ? 'Agent 已生成图片' : 'Agent 已回复',
+      outputIds.length > 0 ? `Agent 回复已结束，共生成 ${outputIds.length} 张图片。` : 'Agent 回复已结束。',
+    )
   } catch (err) {
     if (controller.signal.aborted) {
       if (markAgentRoundStopped(conversationId, roundId)) {
@@ -4075,6 +4520,7 @@ async function executeTask(taskId: string) {
     void deleteUnreferencedImageIds(partialImageIdsToClean)
 
     useStore.getState().showToast(`生成完成，共 ${outputIds.length} 张图片`, 'success')
+    if (!isAgentTask(task)) showTaskCompletionNotification('图像生成完成', `生成完成，共 ${outputIds.length} 张图片。`)
     const currentMask = useStore.getState().maskDraft
     if (
       maskDataUrl &&
@@ -4149,15 +4595,188 @@ async function executeTask(taskId: string) {
   }
 }
 
+function normalizeFavoritePatch(task: TaskRecord, patch: Partial<TaskRecord>, defaultFavoriteCollectionId: string | null): Partial<TaskRecord> {
+  if ('favoriteCollectionIds' in patch) {
+    const ids = normalizeFavoriteCollectionIds(patch.favoriteCollectionIds)
+    return { ...patch, favoriteCollectionIds: ids, isFavorite: ids.length > 0 }
+  }
+  if ('isFavorite' in patch) {
+    if (patch.isFavorite) {
+      const ids = normalizeFavoriteCollectionIds(task.favoriteCollectionIds)
+      return { ...patch, favoriteCollectionIds: ids.length ? ids : defaultFavoriteCollectionId ? [defaultFavoriteCollectionId] : [] }
+    }
+    return { ...patch, favoriteCollectionIds: [] }
+  }
+  return patch
+}
+
 export function updateTaskInStore(taskId: string, patch: Partial<TaskRecord>) {
-  const { tasks, setTasks } = useStore.getState()
+  const { tasks, setTasks, defaultFavoriteCollectionId } = useStore.getState()
   const updated = tasks.map((t) =>
-    t.id === taskId ? { ...t, ...patch } : t,
+    t.id === taskId ? { ...t, ...normalizeFavoritePatch(t, patch, defaultFavoriteCollectionId) } : t,
   )
+  const task = updated.find((t) => t.id === taskId)
   setTasks(updated)
   maybeOpenSupportPrompt(tasks, updated, taskId)
-  const task = updated.find((t) => t.id === taskId)
   if (task) putTask(task)
+}
+
+function normalizeFavoriteCollectionIds(ids: unknown) {
+  if (!Array.isArray(ids)) return []
+  return Array.from(new Set(ids.map(String).filter((id) => id && id !== ALL_FAVORITES_COLLECTION_ID)))
+}
+
+function sameFavoriteCollectionIds(a: string[], b: string[]) {
+  if (a.length !== b.length) return false
+  const bSet = new Set(b)
+  return a.every((id) => bSet.has(id))
+}
+
+export function getTaskFavoriteCollectionIds(task: TaskRecord) {
+  const ids = normalizeFavoriteCollectionIds(task.favoriteCollectionIds)
+  if (ids.length > 0) return ids
+  const defaultFavoriteCollectionId = useStore.getState().defaultFavoriteCollectionId
+  return task.isFavorite && defaultFavoriteCollectionId ? [defaultFavoriteCollectionId] : []
+}
+
+function normalizeTaskFavoriteState(task: TaskRecord, collections: FavoriteCollection[]): TaskRecord {
+  const collectionIdSet = new Set(collections.map((collection) => collection.id))
+  const normalizedIds = normalizeFavoriteCollectionIds(task.favoriteCollectionIds).filter((id) => collectionIdSet.has(id))
+  // 旧版本只有 isFavorite 没有 favoriteCollectionIds，迁移到"默认"收藏夹
+  const defaultId = getDefaultNamedFavoriteCollectionId(collections)
+  const ids = normalizedIds.length > 0 ? normalizedIds : task.isFavorite && defaultId ? [defaultId] : []
+  const isFavorite = ids.length > 0 || Boolean(task.isFavorite)
+  if (ids.length === (task.favoriteCollectionIds ?? []).length && ids.every((id, index) => id === task.favoriteCollectionIds?.[index]) && Boolean(task.isFavorite) === isFavorite) {
+    return task
+  }
+  return { ...task, favoriteCollectionIds: ids, isFavorite }
+}
+
+function normalizeLoadedFavoriteState(tasks: TaskRecord[], collections: FavoriteCollection[], preferredDefaultFavoriteCollectionId: string | null) {
+  let changed = false
+  // 确保"默认"收藏夹存在，给孤立收藏任务一个归属
+  const normalizedCollections = ensureDefaultNamedCollection(ensureDefaultFavoriteCollection(normalizeFavoriteCollections(collections)))
+  const defaultFavoriteCollectionId = resolveDefaultFavoriteCollectionId(normalizedCollections, preferredDefaultFavoriteCollectionId)
+  const normalizedTasks = tasks.map((task) => {
+    const nextTask = normalizeTaskFavoriteState(task, normalizedCollections)
+    if (nextTask !== task) changed = true
+    return nextTask
+  })
+  return { tasks: normalizedTasks, collections: normalizedCollections, defaultFavoriteCollectionId, changed }
+}
+
+export function getFavoriteCollectionTitle(collectionId: string | null, collections = useStore.getState().favoriteCollections) {
+  if (collectionId === ALL_FAVORITES_COLLECTION_ID) return '全部'
+  return collections.find((collection) => collection.id === collectionId)?.name ?? DEFAULT_FAVORITE_COLLECTION_NAME
+}
+
+export function createFavoriteCollection(name: string) {
+  const normalizedName = normalizeFavoriteCollectionName(name)
+  if (!normalizedName) return null
+  if (Array.from(normalizedName).length > 60) {
+    useStore.getState().showToast('收藏夹名称最多 60 个字符', 'error')
+    return null
+  }
+  const state = useStore.getState()
+  const existing = state.favoriteCollections.find((collection) => collection.name === normalizedName)
+  if (existing) return existing
+  const now = Date.now()
+  const collection: FavoriteCollection = { id: genId(), name: normalizedName, createdAt: now, updatedAt: now }
+  state.setFavoriteCollections([...state.favoriteCollections, collection])
+  state.showToast(`已创建收藏夹「${normalizedName}」`, 'success')
+  return collection
+}
+
+export function renameFavoriteCollection(collectionId: string, name: string) {
+  const normalizedName = normalizeFavoriteCollectionName(name)
+  if (!normalizedName || collectionId === ALL_FAVORITES_COLLECTION_ID) return
+  if (Array.from(normalizedName).length > 60) {
+    useStore.getState().showToast('收藏夹名称最多 60 个字符', 'error')
+    return
+  }
+  const { favoriteCollections, setFavoriteCollections, showToast } = useStore.getState()
+  setFavoriteCollections(favoriteCollections.map((collection) =>
+    collection.id === collectionId ? { ...collection, name: normalizedName, updatedAt: Date.now() } : collection,
+  ))
+  showToast('收藏夹名称已更新', 'success')
+}
+
+export async function updateTasksFavoriteCollections(taskIds: string[], collectionIds: string[]) {
+  const ids = normalizeFavoriteCollectionIds(collectionIds)
+  const uniqueTaskIds = Array.from(new Set(taskIds)).filter(Boolean)
+  if (!uniqueTaskIds.length) return
+  const { tasks, setTasks, clearSelection, showToast } = useStore.getState()
+  const idSet = new Set(uniqueTaskIds)
+  const changedTaskIds = new Set<string>()
+  const updated = tasks.map((task) => {
+    if (!idSet.has(task.id)) return task
+    if (sameFavoriteCollectionIds(getTaskFavoriteCollectionIds(task), ids)) return task
+    changedTaskIds.add(task.id)
+    return { ...task, favoriteCollectionIds: ids, isFavorite: ids.length > 0 }
+  })
+  if (!changedTaskIds.size) {
+    clearSelection()
+    return
+  }
+  setTasks(updated)
+  await Promise.all(updated.filter((task) => changedTaskIds.has(task.id)).map((task) => putTask(task)))
+  clearSelection()
+  showToast(ids.length ? '收藏夹已更新' : '已取消收藏', 'success')
+}
+
+export async function deleteFavoriteCollection(collectionId: string, deleteTasks = false) {
+  if (!collectionId || collectionId === ALL_FAVORITES_COLLECTION_ID) return
+  const state = useStore.getState()
+  const collection = state.favoriteCollections.find((item) => item.id === collectionId)
+  if (!collection || state.favoriteCollections.length <= 1) return
+  const collectionTaskRefs = state.tasks
+    .map((task) => ({ task, favoriteIds: getTaskFavoriteCollectionIds(task) }))
+    .filter(({ favoriteIds }) => favoriteIds.includes(collectionId))
+  const taskIds = collectionTaskRefs.map(({ task }) => task.id)
+  const nextCollections = state.favoriteCollections.filter((item) => item.id !== collectionId)
+  const nextCollectionIdSet = new Set(nextCollections.map((item) => item.id))
+  state.setFavoriteCollections(nextCollections)
+  if (state.defaultFavoriteCollectionId === collectionId) {
+    const nextDefaultId = nextCollections[0]?.id
+    if (nextDefaultId) useStore.getState().setDefaultFavoriteCollectionId(nextDefaultId)
+  }
+  if (state.activeFavoriteCollectionId === collectionId) state.setActiveFavoriteCollectionId(null)
+  if (deleteTasks) {
+    const idsByTaskToKeep = new Map<string, string[]>()
+    const taskIdsToDelete: string[] = []
+    for (const { task, favoriteIds } of collectionTaskRefs) {
+      const nextIds = favoriteIds.filter((id) => id !== collectionId && nextCollectionIdSet.has(id))
+      if (nextIds.length) {
+        idsByTaskToKeep.set(task.id, nextIds)
+      } else {
+        taskIdsToDelete.push(task.id)
+      }
+    }
+    if (idsByTaskToKeep.size) {
+      const latestTasks = useStore.getState().tasks
+      const updated = latestTasks.map((task) => {
+        const ids = idsByTaskToKeep.get(task.id)
+        return ids ? { ...task, favoriteCollectionIds: ids, isFavorite: true } : task
+      })
+      useStore.getState().setTasks(updated)
+      await Promise.all(updated.filter((task) => idsByTaskToKeep.has(task.id)).map((task) => putTask(task)))
+    }
+    if (taskIdsToDelete.length) await removeMultipleTasks(taskIdsToDelete)
+  } else if (taskIds.length) {
+    const idsByTaskId = new Map(collectionTaskRefs.map(({ task, favoriteIds }) => [
+      task.id,
+      favoriteIds.filter((id) => id !== collectionId && nextCollectionIdSet.has(id)),
+    ]))
+    const updated = state.tasks.map((task) => {
+      const ids = idsByTaskId.get(task.id)
+      if (!ids) return task
+      return { ...task, favoriteCollectionIds: ids, isFavorite: ids.length > 0 }
+    })
+    state.setTasks(updated)
+    await Promise.all(updated.filter((task) => idsByTaskId.has(task.id)).map((task) => putTask(task)))
+  }
+  useStore.getState().setSelectedFavoriteCollectionIds((ids) => ids.filter((id) => id !== collectionId))
+  useStore.getState().showToast(`已删除收藏夹「${collection.name}」`, 'success')
 }
 
 /** 重试失败的任务：创建新任务并执行 */
@@ -4323,7 +4942,7 @@ export async function removeMultipleTasks(taskIds: string[]) {
     useStore.getState().setSelectedTaskIds(newSelection)
   }
 
-  showToast(`已删除 ${taskIds.length} 条记录`, 'success')
+  showToast(`已删除 ${taskIds.length} 个任务`, 'success')
 }
 
 /** 删除单条任务 */
@@ -4362,7 +4981,7 @@ export async function removeTask(task: TaskRecord) {
     }
   }
 
-  showToast('记录已删除', 'success')
+  showToast('任务已删除', 'success')
 }
 
 /** 清空数据选项 */
@@ -4377,6 +4996,7 @@ export async function clearData(options: ClearOptions = { clearConfig: true, cle
 
   if (options.clearTasks) {
     await dbClearTasks()
+    await getStorage().clearAgentConversations()
     await clearImages()
     await getStorage().clearCanvasImages()
     imageCache.clear()
@@ -4455,6 +5075,7 @@ async function completeRecoveredCustomTask(task: TaskRecord, result: Awaited<Ret
     elapsed: Date.now() - task.createdAt,
   })
   useStore.getState().showToast(`自定义异步任务已恢复，共 ${outputIds.length} 张图片`, 'success')
+  if (!isAgentTask(task)) showTaskCompletionNotification('图像生成完成', `自定义异步任务已恢复，共 ${outputIds.length} 张图片。`)
 }
 
 async function recoverCustomTask(taskId: string) {
@@ -4503,7 +5124,7 @@ export async function exportData(options: ExportOptions = { exportConfig: true, 
     const tasks = options.exportTasks ? await getAllTasks() : []
     const images = options.exportTasks ? await getAllImages() : []
     const canvasImages = options.exportTasks ? await getStorage().getAllCanvasImages() : []
-    const { settings, agentConversations } = useStore.getState()
+    const { settings, agentConversations, favoriteCollections, defaultFavoriteCollectionId } = useStore.getState()
     const exportedAt = Date.now()
     const imageCreatedAtFallback = new Map<string, number>()
 
@@ -4579,7 +5200,9 @@ export async function exportData(options: ExportOptions = { exportConfig: true, 
     if (options.exportTasks) {
       manifest.tasks = tasks
       manifest.canvasImages = canvasImages
-      manifest.agentConversations = agentConversations
+      manifest.favoriteCollections = favoriteCollections
+      manifest.defaultFavoriteCollectionId = defaultFavoriteCollectionId
+      manifest.agentConversations = getPersistableAgentConversations(agentConversations)
       manifest.imageFiles = imageFiles
       manifest.thumbnailFiles = thumbnailFiles
     }
@@ -4672,7 +5295,21 @@ export async function importData(file: File, options: ImportOptions = { importCo
       }
 
       const tasks = await getAllTasks()
-      useStore.getState().setTasks(tasks)
+      const state = useStore.getState()
+      const importedCollections = normalizeFavoriteCollections(data.favoriteCollections)
+      const favoriteCollections = importedCollections.length
+        ? ensureDefaultFavoriteCollection(normalizeFavoriteCollections([...state.favoriteCollections, ...importedCollections]))
+        : state.favoriteCollections
+      const defaultFavoriteCollectionId = importedCollections.length
+        ? resolveDefaultFavoriteCollectionId(favoriteCollections, data.defaultFavoriteCollectionId)
+        : state.defaultFavoriteCollectionId
+      const normalizedFavorites = normalizeLoadedFavoriteState(tasks, favoriteCollections, defaultFavoriteCollectionId)
+      useStore.setState({
+        tasks: normalizedFavorites.tasks,
+        favoriteCollections: normalizedFavorites.collections,
+        defaultFavoriteCollectionId: normalizedFavorites.defaultFavoriteCollectionId,
+      })
+      if (normalizedFavorites.changed) await Promise.all(normalizedFavorites.tasks.map((task) => putTask(task)))
       const importedAgentConversations = normalizeAgentConversations(data.agentConversations)
         .filter((conversation) => !isEmptyAgentConversation(conversation))
       useStore.setState((state) => {
@@ -4685,6 +5322,7 @@ export async function importData(file: File, options: ImportOptions = { importCo
           activeAgentConversationId,
         }
       })
+      await replaceStoredAgentConversations(useStore.getState().agentConversations)
       skipSupportPromptForImportedData(tasks)
       scheduleThumbnailBackfill(importedImageIds)
     }
@@ -4696,7 +5334,7 @@ export async function importData(file: File, options: ImportOptions = { importCo
 
     let msg = '数据已成功导入'
     if (options.importTasks && data.tasks) {
-      msg = `已导入 ${data.tasks.length} 条记录`
+      msg = `已导入 ${data.tasks.length} 个任务`
     } else if (options.importConfig && data.settings) {
       msg = '配置已成功导入'
     }

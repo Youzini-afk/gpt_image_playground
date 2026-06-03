@@ -106,4 +106,40 @@ describe('server storage image metadata and thumbnails', () => {
       thumbnailVersion: 101,
     })).status).toBe(400)
   })
+
+  it('persists agent conversations through the storage API', async () => {
+    const { dir, storage } = createTempStorage()
+    tempDirs.push(dir)
+    const api = createApiRoutes(storage)
+    const conversations = [
+      {
+        id: 'conversation-a',
+        title: 'Agent A',
+        activeRoundId: null,
+        createdAt: 1,
+        updatedAt: 2,
+        messages: [],
+        rounds: [],
+      },
+    ]
+
+    const putResponse = await api.request('/agent-conversations', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(conversations),
+    })
+    const listResponse = await api.request('/agent-conversations')
+    await api.request('/agent-conversations', { method: 'DELETE' })
+    const clearedResponse = await api.request('/agent-conversations')
+    const invalidResponse = await api.request('/agent-conversations', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: 'not-an-array' }),
+    })
+
+    expect(putResponse.status).toBe(200)
+    expect(await listResponse.json()).toEqual(conversations)
+    expect(await clearedResponse.json()).toEqual([])
+    expect(invalidResponse.status).toBe(400)
+  })
 })

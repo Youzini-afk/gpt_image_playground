@@ -42,8 +42,8 @@ React frontend application layer for GPT Image Playground. This directory owns b
 
 ## Data Flow
 - UI reads/writes reactive state through `useStore` selectors.
-- `store.ts` persists durable task/image/canvas data through `getStorage()`.
-- Browser local mode writes tasks/images/canvas/thumbnails to IndexedDB through `lib/db.ts`.
+- `store.ts` persists durable task/image/canvas/Agent-conversation data through `getStorage()`.
+- Browser local mode writes tasks/images/canvas/thumbnails/Agent conversations to IndexedDB through `lib/db.ts`.
 - Server mode sends JSON requests to `/api/storage/*` through `ServerStorageAdapter`, including lightweight image ID listing and thumbnail persistence endpoints.
 - API calls never store image bytes directly in task records; tasks reference image IDs and optional raw URL/payload metadata.
 

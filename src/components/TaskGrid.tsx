@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState, useEffect, useCallback } from 'react'
-import { useStore, reuseConfig, editOutputs, removeTask } from '../store'
+import { ALL_FAVORITES_COLLECTION_ID, getTaskFavoriteCollectionIds, useStore, reuseConfig, editOutputs, removeTask } from '../store'
 import { getFilteredTasks } from '../lib/tasks'
 import { selectionBoxRect, deriveSelection, type CardGeometry } from '../lib/selectionGeometry'
 import TaskCard from './TaskCard'
@@ -14,6 +14,7 @@ export default function TaskGrid() {
   const searchQuery = useStore((s) => s.searchQuery)
   const filterStatus = useStore((s) => s.filterStatus)
   const filterFavorite = useStore((s) => s.filterFavorite)
+  const activeFavoriteCollectionId = useStore((s) => s.activeFavoriteCollectionId)
   const setDetailTaskId = useStore((s) => s.setDetailTaskId)
   const setConfirmDialog = useStore((s) => s.setConfirmDialog)
   const selectedTaskIds = useStore((s) => s.selectedTaskIds)
@@ -38,7 +39,7 @@ export default function TaskGrid() {
   const sentinelRef = useRef<HTMLDivElement>(null)
   const autoLoadCooldownRef = useRef(false)
 
-  const visibleTaskFilterKey = `${searchQuery}\u0000${filterStatus}\u0000${filterFavorite ? '1' : '0'}`
+  const visibleTaskFilterKey = `${searchQuery}\u0000${filterStatus}\u0000${filterFavorite ? '1' : '0'}\u0000${activeFavoriteCollectionId ?? ''}`
   const [visibleTaskWindow, setVisibleTaskWindow] = useState({
     key: visibleTaskFilterKey,
     count: INITIAL_VISIBLE_TASKS,
@@ -49,8 +50,10 @@ export default function TaskGrid() {
   }, [visibleTaskFilterKey])
 
   const filteredTasks = useMemo(() => {
-    return getFilteredTasks(tasks, searchQuery, filterStatus, filterFavorite)
-  }, [tasks, searchQuery, filterStatus, filterFavorite])
+    const baseTasks = getFilteredTasks(tasks, searchQuery, filterStatus, filterFavorite)
+    if (!filterFavorite || !activeFavoriteCollectionId || activeFavoriteCollectionId === ALL_FAVORITES_COLLECTION_ID) return baseTasks
+    return baseTasks.filter((task) => getTaskFavoriteCollectionIds(task).includes(activeFavoriteCollectionId))
+  }, [tasks, searchQuery, filterStatus, filterFavorite, activeFavoriteCollectionId])
 
   const visibleTaskCount = visibleTaskWindow.key === visibleTaskFilterKey
     ? visibleTaskWindow.count
@@ -114,8 +117,8 @@ export default function TaskGrid() {
 
   const handleDeleteTask = useCallback((task: typeof tasks[0]) => {
     setConfirmDialog({
-      title: '删除记录',
-      message: '确定要删除这条记录吗？关联的图片资源也会被清理（如果没有其他任务引用）。',
+      title: '删除任务',
+      message: '确定要删除这个任务吗？关联的图片资源也会被清理（如果没有其他任务引用）。',
       action: () => removeTask(task),
     })
   }, [setConfirmDialog])
@@ -338,7 +341,7 @@ export default function TaskGrid() {
     return (
       <div className="text-center py-20 text-gray-400 dark:text-gray-500">
         {searchQuery || filterFavorite ? (
-          <p className="text-sm">没有找到匹配的记录</p>
+          <p className="text-sm">没有找到匹配的任务</p>
         ) : (
           <>
             <svg

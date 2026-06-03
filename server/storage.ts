@@ -51,10 +51,17 @@ export class FileStorage {
         created_at INTEGER NOT NULL DEFAULT 0
       );
 
+      CREATE TABLE IF NOT EXISTS agent_conversations (
+        id TEXT PRIMARY KEY,
+        data_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL DEFAULT 0
+      );
+
       CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_images_created_at ON images(created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_image_thumbnails_created_at ON image_thumbnails(created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_canvas_created_at ON canvas_images(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_agent_conversations_updated_at ON agent_conversations(updated_at DESC);
     `)
   }
 
@@ -269,5 +276,36 @@ export class FileStorage {
       const files = readdirSync(this.canvasDir).filter((f) => f.endsWith('.json'))
       for (const f of files) unlinkSync(join(this.canvasDir, f))
     }
+  }
+
+  // ===== Agent Conversations =====
+
+  getAllAgentConversations<Conversation>(): Conversation[] {
+    const rows = this.db
+      .prepare('SELECT data_json FROM agent_conversations ORDER BY updated_at DESC, rowid DESC')
+      .all() as Array<{ data_json: string }>
+    return rows.map((row) => JSON.parse(row.data_json) as Conversation)
+  }
+
+  replaceAgentConversations<Conversation extends { id: string; updatedAt?: number }>(conversations: Conversation[]): void {
+    const replace = this.db.transaction(() => {
+      this.db.prepare('DELETE FROM agent_conversations').run()
+      const insert = this.db.prepare(`
+        INSERT INTO agent_conversations (id, data_json, updated_at)
+        VALUES (@id, @data_json, @updated_at)
+      `)
+      for (const conversation of conversations) {
+        insert.run({
+          id: conversation.id,
+          data_json: JSON.stringify(conversation),
+          updated_at: conversation.updatedAt ?? 0,
+        })
+      }
+    })
+    replace()
+  }
+
+  clearAgentConversations(): void {
+    this.db.prepare('DELETE FROM agent_conversations').run()
   }
 }

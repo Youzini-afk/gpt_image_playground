@@ -1,4 +1,4 @@
-import type { TaskRecord, StoredImage, StoredImageThumbnail, CanvasImage } from '../types'
+import type { AgentConversation, TaskRecord, StoredImage, StoredImageThumbnail, CanvasImage } from '../types'
 import * as localDb from './db'
 
 export type StorageMode = 'local' | 'server'
@@ -22,6 +22,9 @@ export interface StorageAdapter {
   putCanvasImage(item: CanvasImage): Promise<void>
   deleteCanvasImage(id: string): Promise<void>
   clearCanvasImages(): Promise<void>
+  getAllAgentConversations(): Promise<AgentConversation[]>
+  replaceAgentConversations(conversations: AgentConversation[]): Promise<void>
+  clearAgentConversations(): Promise<void>
 }
 
 class LocalStorageAdapter implements StorageAdapter {
@@ -43,6 +46,9 @@ class LocalStorageAdapter implements StorageAdapter {
   putCanvasImage(item: CanvasImage) { return localDb.putCanvasImage(item).then(() => {}) }
   deleteCanvasImage(id: string) { return localDb.deleteCanvasImage(id).then(() => {}) }
   clearCanvasImages() { return localDb.clearCanvasImages().then(() => {}) }
+  getAllAgentConversations() { return localDb.getAllAgentConversations() }
+  replaceAgentConversations(conversations: AgentConversation[]) { return localDb.replaceAgentConversations(conversations) }
+  clearAgentConversations() { return localDb.clearAgentConversations() }
 }
 
 class ServerStorageAdapter implements StorageAdapter {
@@ -157,6 +163,19 @@ class ServerStorageAdapter implements StorageAdapter {
 
   async clearCanvasImages(): Promise<void> {
     await this.request('/canvas-images', { method: 'DELETE' })
+  }
+
+  async getAllAgentConversations(): Promise<AgentConversation[]> {
+    const res = await this.request('/agent-conversations')
+    return res.json()
+  }
+
+  async replaceAgentConversations(conversations: AgentConversation[]): Promise<void> {
+    await this.request('/agent-conversations', { method: 'PUT', body: JSON.stringify(conversations) })
+  }
+
+  async clearAgentConversations(): Promise<void> {
+    await this.request('/agent-conversations', { method: 'DELETE' })
   }
 }
 

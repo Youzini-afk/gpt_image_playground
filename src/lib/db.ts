@@ -1,11 +1,12 @@
-import type { TaskRecord, StoredImage, StoredImageThumbnail, CanvasImage } from '../types'
+import type { AgentConversation, TaskRecord, StoredImage, StoredImageThumbnail, CanvasImage } from '../types'
 
 const DB_NAME = 'gpt-image-playground'
-const DB_VERSION = 3
+const DB_VERSION = 4
 const STORE_TASKS = 'tasks'
 const STORE_IMAGES = 'images'
 const STORE_CANVAS = 'canvasImages'
 const STORE_THUMBNAILS = 'thumbnails'
+const STORE_AGENT_CONVERSATIONS = 'agentConversations'
 const THUMBNAIL_MAX_SIZE = 720
 const THUMBNAIL_QUALITY = 0.9
 const THUMBNAIL_VERSION = 2
@@ -32,6 +33,9 @@ function openDB(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(STORE_THUMBNAILS)) {
         db.createObjectStore(STORE_THUMBNAILS, { keyPath: 'id' })
+      }
+      if (!db.objectStoreNames.contains(STORE_AGENT_CONVERSATIONS)) {
+        db.createObjectStore(STORE_AGENT_CONVERSATIONS, { keyPath: 'id' })
       }
     }
     req.onsuccess = () => {
@@ -81,6 +85,39 @@ export function deleteTask(id: string): Promise<undefined> {
 
 export function clearTasks(): Promise<undefined> {
   return dbTransaction(STORE_TASKS, 'readwrite', (s) => s.clear())
+}
+
+// ===== Agent conversations =====
+
+export function getAllAgentConversations(): Promise<AgentConversation[]> {
+  return dbTransaction(STORE_AGENT_CONVERSATIONS, 'readonly', (s) => s.getAll())
+}
+
+export function putAgentConversation(conversation: AgentConversation): Promise<IDBValidKey> {
+  return dbTransaction(STORE_AGENT_CONVERSATIONS, 'readwrite', (s) => s.put(conversation))
+}
+
+export function deleteAgentConversation(id: string): Promise<undefined> {
+  return dbTransaction(STORE_AGENT_CONVERSATIONS, 'readwrite', (s) => s.delete(id))
+}
+
+export function clearAgentConversations(): Promise<undefined> {
+  return dbTransaction(STORE_AGENT_CONVERSATIONS, 'readwrite', (s) => s.clear())
+}
+
+export function replaceAgentConversations(conversations: AgentConversation[]): Promise<undefined> {
+  return openDB().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_AGENT_CONVERSATIONS, 'readwrite')
+        const store = tx.objectStore(STORE_AGENT_CONVERSATIONS)
+        store.clear()
+        for (const conversation of conversations) store.put(conversation)
+        tx.oncomplete = () => resolve(undefined)
+        tx.onerror = () => reject(tx.error)
+        tx.onabort = () => reject(tx.error)
+      }),
+  )
 }
 
 // ===== Images =====
