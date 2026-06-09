@@ -15,9 +15,9 @@ Frontend business and infrastructure library. This directory contains API provid
 - `agentApi.ts`: OpenAI Responses Agent helper for conversation turns, text/image streaming callbacks, built-in image generation output parsing, batch image function calls, and title generation.
 - `agentImageReferences.ts`: Resolves Agent current-input and generated-image reference IDs, rewrites `@图`/round refs into API-safe `<ref>` tags, and collects generated image slots from task records.
 - `agentWebSearch.ts`: Agent web-search tool configuration helpers.
-- `openaiCompatibleImageApi.ts`: OpenAI-compatible and custom HTTP image client. Handles Images API, Responses API, custom submit/poll mappings, Codex CLI prompt guarding, multipart edits, mask uploads, proxy routing, timeout aborts, URL/base64 result parsing, revised prompts, actual params, raw payload capture, and queued custom recovery.
+- `openaiCompatibleImageApi.ts`: OpenAI-compatible and custom HTTP image client. Handles Images API, Responses API, custom submit/poll mappings, Codex CLI prompt guarding, multipart edits, mask uploads, proxy routing, timeout aborts, streaming compatibility hints, URL/base64 result parsing, revised prompts, actual params, raw payload capture, and queued custom recovery.
 - `falAiImageApi.ts`: fal.ai client using `@fal-ai/client`. Maps model IDs to generate/edit endpoints, caps image count to fal limits, subscribes to queue jobs, records request IDs/endpoints for recovery, parses URL/base64 result variants, and maps actual params.
-- `imageApiShared.ts`: Shared call types/utilities for MIME mapping, data URL handling, fetch diagnostics, API error extraction, payload-size assertions, base64 normalization, remote image fetching, and actual-param merging.
+- `imageApiShared.ts`: Shared call types/utilities for MIME mapping, data URL handling, fetch diagnostics, API error extraction, streaming format hints, payload-size assertions, base64 normalization, remote image fetching, and actual-param merging.
 
 ## Settings And Parameter Modules
 - `apiProfiles.ts`: Creates default OpenAI/fal profiles, normalizes legacy flat settings, validates and merges custom provider manifests, switches provider defaults, validates profiles, deduplicates imported profiles, and merges imported settings.
@@ -38,6 +38,7 @@ Frontend business and infrastructure library. This directory contains API provid
 - `selectionGeometry.ts`: Pure geometry helpers for drag-select rectangle intersection and selection derivation against cached card bounding boxes.
 - `mask.ts`: Orders mask-target images, classifies mask coverage, and asserts mask validity.
 - `maskPreprocess.ts`: Resizes large mask targets to a maximum edge of 1920 and dimensions divisible by 16, converts to PNG, and replaces the target input image with the working copy.
+- `transparentImage.ts`: Transparent PNG post-processing helpers. Adds a keyed-background prompt transform and removes green/magenta keyed backgrounds from generated PNG outputs while preserving original-output IDs for fallback/download flows.
 - `viewportTransform.ts`: Pure pan/zoom/clamp math used by the mask editor.
 - `clipboard.ts`: Clipboard write helpers with fallback messages.
 - `downloadImages.ts`: Shared single/batch image download naming and archive helpers.

@@ -1,5 +1,7 @@
 # ---- Build stage ----
-FROM --platform=$BUILDPLATFORM node:20-alpine AS build
+# Build on the target platform so native runtime modules such as better-sqlite3
+# match the final Node server image architecture.
+FROM node:20-alpine AS build
 
 WORKDIR /app
 
@@ -13,7 +15,10 @@ COPY package.json package-lock.json ./
 RUN npm ci
 
 COPY . .
-RUN npm run build:all
+RUN apk add --no-cache --virtual .build-deps python3 make g++ libc6-compat && \
+    npm run build:all && \
+    npm prune --omit=dev && \
+    apk del .build-deps
 
 # ---- Production stage ----
 FROM node:20-alpine
@@ -32,9 +37,8 @@ ENV LOCK_API_PROXY=false
 WORKDIR /app
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/dist-server ./dist-server
+COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/package.json ./
-
-RUN npm install --omit=dev hono @hono/node-server
 
 COPY --chmod=755 deploy/migrate-api-env.envsh /docker-entrypoint.d/05-migrate-api-env.envsh
 COPY --chmod=755 deploy/inject-api-url.sh /docker-entrypoint.d/40-inject-api-url.sh

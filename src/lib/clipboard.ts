@@ -15,15 +15,6 @@ export async function copyTextToClipboard(text: string) {
   throw asyncClipboardError ?? new Error('Clipboard API is not available')
 }
 
-export async function copyBlobToClipboard(blob: Blob | Promise<Blob>) {
-  if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
-    throw new Error('Clipboard image API is not available')
-  }
-
-  const resolvedBlob = await Promise.resolve(blob)
-  await writeImageBlobToClipboard(resolvedBlob)
-}
-
 export async function copyImageSourceToClipboard(src: string | Promise<string | undefined>) {
   if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
     throw new Error('Clipboard image API is not available')
@@ -33,6 +24,14 @@ export async function copyImageSourceToClipboard(src: string | Promise<string | 
   if (!resolvedSrc) throw new Error('Image source is not available')
   const res = await fetch(resolvedSrc)
   const blob = await res.blob()
+  await writeImageBlobToClipboard(blob)
+}
+
+export async function copyBlobToClipboard(blob: Blob) {
+  if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
+    throw new Error('Clipboard image API is not available')
+  }
+
   await writeImageBlobToClipboard(blob)
 }
 

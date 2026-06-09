@@ -1,7 +1,7 @@
 # src/
 
 ## Responsibility
-React frontend application layer for GPT Image Playground. This directory owns browser bootstrapping, the Zustand application store, domain types, global styles, UI composition, local/server storage orchestration, image-generation workflows, Agent/Responses workflows, thumbnail cache/backfill, URL settings bootstrap, and custom provider configuration.
+React frontend application layer for GPT Image Playground. This directory owns browser bootstrapping, the Zustand application store, domain types, global styles, UI composition, local/server storage orchestration, image-generation workflows, transparent-background post-processing, Agent/Responses workflows, thumbnail cache/backfill, URL settings bootstrap, and custom provider configuration.
 
 ## Entry Points
 - `main.tsx`: React 19 StrictMode entry point. Installs mobile viewport guards from `lib/viewport` before rendering `App`.
@@ -30,8 +30,9 @@ React frontend application layer for GPT Image Playground. This directory owns b
 2. `submitTask()` validates the active profile/custom provider, stores input images, normalizes params, creates a running `TaskRecord`, persists it, and calls `executeTask()`.
 3. `executeTask()` ensures referenced images are cached, orders masked inputs, and calls `callImageApi()`.
 4. Provider calls return generated image data URLs or raw image URLs plus actual params/revised prompts.
-5. Output images are stored by hash, thumbnails are generated/backfilled, task status is updated, and card/detail views receive lightweight preview data.
-6. fal.ai and custom async provider tasks can be marked recoverable and polled after interruptions/restarts.
+5. If transparent PNG output is requested, generated images are post-processed locally and the original output IDs are retained for fallback/original-download flows.
+6. Output images are stored by hash, thumbnails are generated/backfilled, task status is updated, and card/detail views receive lightweight preview data.
+7. fal.ai and custom async provider tasks can be marked recoverable and polled after interruptions/restarts.
 
 ## Agent Generation Flow
 1. `AgentWorkspace` and `InputBar` collect Agent prompts, uploaded references, and `@` image mentions.
@@ -46,6 +47,7 @@ React frontend application layer for GPT Image Playground. This directory owns b
 - Browser local mode writes tasks/images/canvas/thumbnails/Agent conversations to IndexedDB through `lib/db.ts`.
 - Server mode sends JSON requests to `/api/storage/*` through `ServerStorageAdapter`, including lightweight image ID listing and thumbnail persistence endpoints.
 - API calls never store image bytes directly in task records; tasks reference image IDs and optional raw URL/payload metadata.
+- Failed-task cleanup delegates through the same task deletion path so image, thumbnail, Agent payload, canvas, and storage-adapter reference accounting stays consistent.
 
 ## Integration Points
 - `components/`: all visible UI surfaces and complex interaction handlers.

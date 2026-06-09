@@ -1,7 +1,7 @@
 # Repository Atlas: gpt-image-playground
 
 ## Project Responsibility
-GPT Image Playground is a React/TypeScript web app for image generation and editing against OpenAI-compatible, fal.ai, and user-defined HTTP image APIs. It provides a local-first UI for prompts, reference images, masks, task history, thumbnails, parameter tracking, custom provider configuration, import/export, optional Docker/Node server storage, API proxy support, and Cloudflare static deployment.
+GPT Image Playground is a React/TypeScript web app for image generation and editing against OpenAI-compatible, fal.ai, and user-defined HTTP image APIs. It provides a local-first UI for prompts, reference images, masks, task history, thumbnails, transparent-background post-processing, parameter tracking, custom provider configuration, import/export, optional Docker/Node server storage, API proxy support, and Cloudflare static deployment.
 
 ## Technology Stack
 - Frontend: React 19, TypeScript, Vite, Tailwind CSS, Zustand.
@@ -47,9 +47,10 @@ GPT Image Playground is a React/TypeScript web app for image generation and edit
 2. `submitTask()` in `src/store.ts` validates the active profile and creates a running `TaskRecord`.
 3. `executeTask()` loads image data URLs, orders mask inputs, and calls `callImageApi()`.
 4. `src/lib/api.ts` dispatches to OpenAI-compatible, fal.ai, or custom-provider code.
-5. Generated images are normalized to data URLs, stored by content hash, and referenced by task output IDs.
-6. Thumbnails are generated/stored separately to avoid decoding full-resolution images in list/detail previews.
-7. Task metadata records status, elapsed time, actual params, revised prompts, provider name/model, raw URLs/payloads, and recovery metadata where applicable.
+5. Generated images are normalized to data URLs; optional transparent PNG post-processing removes keyed backgrounds while retaining original-output references for download/fallback.
+6. Stored images are deduplicated by content hash and task records reference image IDs rather than embedding image data.
+7. Thumbnails are generated/stored separately to avoid decoding full-resolution images in list/detail previews.
+8. Task metadata records status, elapsed time, actual params, revised prompts, provider name/model, raw URLs/payloads, streaming partial images, transparent-original IDs, and recovery metadata where applicable.
 
 ### Storage
 1. Frontend code calls `getStorage()` from `src/lib/storage.ts`.
@@ -79,4 +80,5 @@ GPT Image Playground is a React/TypeScript web app for image generation and edit
 - Preserve the local/server storage adapter boundary.
 - Preserve the full-image vs thumbnail split; list/card/detail previews should prefer thumbnails.
 - Route OpenAI-compatible behavior through `src/lib/openaiCompatibleImageApi.ts`, fal.ai behavior through `src/lib/falAiImageApi.ts`, and custom provider behavior through the manifest/template path.
+- Keep transparent-background post-processing as a presentation/output transform: persisted task records must preserve both final transparent outputs and original-output IDs when available.
 - Treat proxy paths as security-sensitive; keep the allowlist narrow.

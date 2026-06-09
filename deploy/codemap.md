@@ -4,9 +4,9 @@
 Deployment support files for container/runtime configuration. This directory focuses on Docker runtime environment migration, frontend build-time placeholder injection, and an alternate Nginx static/proxy deployment shape.
 
 ## Files
-- `Dockerfile`: Cross-platform multi-stage Docker build variant using `--platform=$BUILDPLATFORM` for the build stage. Produces `dist/` and `dist-server/`, installs runtime server dependencies, copies entrypoint scripts, exposes port 80, and stores server data under `/app/data`.
+- `Dockerfile`: Multi-stage Docker build variant that builds on the target platform so native SQLite modules match the final Node server image. Produces `dist/`, `dist-server/`, and pruned runtime `node_modules`; copies entrypoint scripts, exposes port 80, and stores server data under `/app/data`.
 - `migrate-api-env.envsh`: Normalizes legacy Docker `API_URL` into `DEFAULT_API_URL` and `API_PROXY_URL`, and exports `DOCKER_LEGACY_API_URL_USED` for frontend notices.
-- `inject-api-url.sh`: Replaces Vite placeholder strings in built JS assets with runtime `DEFAULT_API_URL`, proxy availability, Docker deployment marker, and legacy migration marker before execing the server command. Also injects runtime values needed by the v0.3 custom-provider/proxy UI.
+- `inject-api-url.sh`: Replaces Vite placeholder strings in built JS assets with runtime `DEFAULT_API_URL`, proxy availability/lock state, Docker deployment marker, and legacy migration marker before execing the server command. Also injects runtime values needed by the custom-provider/proxy UI.
 - `nginx.conf`: Alternate static-site deployment config. Serves Vite assets with long cache headers, falls back to `index.html`, and provides a restricted `/api-proxy/` forwarding path for allowed image endpoints.
 
 ## Runtime Flow

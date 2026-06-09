@@ -12,14 +12,14 @@ Presentation and interaction layer for the image playground. Components bind Zus
 
 ## Key Components
 - `Header.tsx`: Title bar, GitHub link, update badge via `useVersionCheck`, help/settings buttons, and responsive chrome.
-- `SearchBar.tsx`: Prompt/param search, status filtering, favorite filtering.
+- `SearchBar.tsx`: Prompt/param search, status filtering, favorite filtering, failed-task cleanup entry points, and filtered task-count controls.
 - `AgentWorkspace.tsx`: Agent conversation surface with branching rounds, streamed assistant output, generated image refs, web-search/tool status, and history/sidebar interactions.
 - `TaskGrid.tsx`: Responsive task and canvas image grid. Uses shared task filtering, bounded visible task chunks with load-more and IntersectionObserver auto-load sentinel, desktop drag-select with cached card geometry, Ctrl/Command selection, and thumbnail background backfill.
 - `TaskCard.tsx`: Memoized task summary card with lazy thumbnail loading, streaming preview support, status display, retry, favorite, reuse, edit-output, delete, and parameter display.
 - `CanvasImageCard.tsx`: Memoized workbench image card with add-to-reference, copy, download, delete, context menu support, and narrowed input-membership subscription.
 - `InputBar.tsx`: Bottom input dock for prompt, uploaded/reference images, Agent `@` mentions, mask target editing, size/quality/format/compression/moderation/n params, drag/drop, paste, mobile collapse, and batch actions over the current filtered task set.
 - `SettingsModal.tsx`: API profile/custom provider CRUD, OpenAI/fal/custom configuration, Responses streaming controls, Agent settings, proxy toggle, storage mode, data import/export, clear-all flow, and connection testing.
-- `DetailModal.tsx`: Task detail view showing outputs, input references, actual-vs-request params, revised prompts, raw URLs/payloads, elapsed time, and task actions. Current output display uses runtime object URLs while input/mask data stays as data URLs.
+- `DetailModal.tsx`: Task detail view showing outputs, input references, transparent-original downloads, actual-vs-request params, revised prompts, raw URLs/payloads, elapsed time, and task actions. Current output display uses runtime object URLs while input/mask data stays as data URLs.
 - `Lightbox.tsx`: Full image viewer with zoom, pan, wheel scaling, pinch gestures, double-tap zoom, keyboard navigation, mask overlay preview, and scroll locking. Main image display uses runtime object URLs while mask previews stay data URL backed.
 - `MaskEditorModal.tsx`: Canvas-based mask editor with brush/eraser, undo/redo history, pan/zoom transform, touch support, PNG mask export, and mask target replacement.
 - `ImageContextMenu.tsx`: Global right-click menu for images; routes selected image actions to input/canvas/edit/download/copy flows.

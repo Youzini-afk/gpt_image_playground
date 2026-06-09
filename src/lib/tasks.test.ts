@@ -13,6 +13,7 @@ function makeTask(overrides: Partial<TaskRecord> & { id: string }): TaskRecord {
       output_compression: null,
       moderation: 'auto',
       n: 1,
+      transparent_output: false,
     },
     status: overrides.status ?? 'done',
     isFavorite: overrides.isFavorite ?? false,
@@ -82,8 +83,8 @@ describe('getFilteredTasks', () => {
 
   it('searches params JSON case-insensitively', () => {
     const tasks = [
-      makeTask({ id: '1', params: { size: '1024x1024', quality: 'auto', output_format: 'png', output_compression: null, moderation: 'auto', n: 1 } }),
-      makeTask({ id: '2', params: { size: '512x512', quality: 'high', output_format: 'jpeg', output_compression: null, moderation: 'auto', n: 1 } }),
+      makeTask({ id: '1', params: { size: '1024x1024', quality: 'auto', output_format: 'png', output_compression: null, moderation: 'auto', n: 1, transparent_output: false } }),
+      makeTask({ id: '2', params: { size: '512x512', quality: 'high', output_format: 'jpeg', output_compression: null, moderation: 'auto', n: 1, transparent_output: false } }),
     ]
 
     expect(getFilteredTasks(tasks, '1024', 'all', false).map((t) => t.id)).toEqual(['1'])
